@@ -1,0 +1,21 @@
+{
+  "name": "milk-whatsapp-backend",
+  "version": "1.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Express + MySQL API for the MilkPro WhatsApp Sender (XAMPP / MariaDB compatible)",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "db:test": "node database/test-connection.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mysql2": "^3.11.5"
+  }
+}
