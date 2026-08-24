@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../lib/store";
 import type { EnrichedRow } from "../lib/store";
 import { getCollections, lastNDates, producerById, toISO } from "../lib/data";
 import type { MsgStatus } from "../lib/data";
 import { cn, fmtDate, inr, STATUS_META } from "../lib/utils";
+import * as api from "../lib/api";
 import { EXPORT_FIELDS, exportRowsToXlsx } from "../lib/excel";
 import type { ExportFieldKey } from "../lib/excel";
 import { Icon } from "../components/icons";
@@ -17,20 +18,50 @@ function isoAddDays(iso: string, days: number): string {
 }
 
 export function ExportPage() {
-  const { date, messages, messageFor, toast } = useApp();
+  const { date, messages, messageFor, toast, mode } = useApp();
   const [from, setFrom] = useState(isoAddDays(date, -6));
   const [to, setTo] = useState(date);
   const [shift, setShift] = useState<"ALL" | "AM" | "PM">("ALL");
   const [status, setStatus] = useState<"ALL" | MsgStatus>("ALL");
   const [fields, setFields] = useState<Set<ExportFieldKey>>(new Set(EXPORT_FIELDS.map((f) => f.key)));
   const [exporting, setExporting] = useState(false);
+  const [liveRows, setLiveRows] = useState<EnrichedRow[] | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+
+  const dateList = useMemo(() => {
+    if (!from || !to || from > to) return [] as string[];
+    return lastNDates(Math.min(61, Math.round((new Date(to).getTime() - new Date(from).getTime()) / 86400000) + 1), to)
+      .filter((d) => d >= from && d <= to);
+  }, [from, to]);
+  const rangeKey = dateList.join(",");
+  const tooWide = mode === "live" && dateList.length > 31;
+
+  useEffect(() => {
+    if (mode !== "live") return;
+    if (tooWide || dateList.length === 0) { setLiveRows(dateList.length === 0 ? [] : null); return; }
+    let cancelled = false;
+    setLiveLoading(true);
+    void Promise.all(dateList.map((d) => api.fetchCollection(d))).then((results) => {
+      if (cancelled) return;
+      const out: EnrichedRow[] = [];
+      for (const r of results) if (r) out.push(...r);
+      out.sort((a, b) => (a.date === b.date ? a.producer.name.localeCompare(b.producer.name) : a.date < b.date ? 1 : -1));
+      setLiveRows(out);
+      setLiveLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, rangeKey, tooWide]);
 
   const rows = useMemo<EnrichedRow[]>(() => {
-    if (!from || !to || from > to) return [];
-    const dates = lastNDates(Math.min(61, Math.round((new Date(to).getTime() - new Date(from).getTime()) / 86400000) + 1), to)
-      .filter((d) => d >= from && d <= to);
+    if (mode === "live") {
+      if (!liveRows) return [];
+      return liveRows.filter(
+        (r) => (shift === "ALL" || r.shift === shift) && (status === "ALL" || (r.msg?.status ?? "pending") === status),
+      );
+    }
     const out: EnrichedRow[] = [];
-    for (const d of dates) {
+    for (const d of dateList) {
       for (const c of getCollections(d)) {
         if (shift !== "ALL" && c.shift !== shift) continue;
         const msg = messages[c.id];
@@ -39,7 +70,7 @@ export function ExportPage() {
       }
     }
     return out;
-  }, [from, to, shift, status, messages]);
+  }, [mode, liveRows, dateList, shift, status, messages]);
 
   const toggleField = (k: ExportFieldKey) => setFields((s) => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; });
   const orderedFields = EXPORT_FIELDS.filter((f) => fields.has(f.key)).map((f) => f.key);
@@ -107,7 +138,11 @@ export function ExportPage() {
             <span className="text-[11px] font-bold text-ink-soft tnum">{from} → {to}</span>
           </div>
           {rows.length === 0 ? (
-            <p className="px-4 py-8 text-center text-sm text-ink-soft">No rows in this range — widen the dates or clear the status filter.</p>
+            <p className="px-4 py-8 text-center text-sm text-ink-soft">
+              {tooWide ? "Live export supports ranges up to 31 days — narrow the dates to continue."
+                : liveLoading ? "Querying MySQL for this range…"
+                : "No rows in this range — widen the dates or clear the status filter."}
+            </p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[760px] text-left text-xs">

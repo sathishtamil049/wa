@@ -103,6 +103,45 @@ PUT  /api/whatsapp/template                       { template }
 | `require is not defined` | Module system mismatch | This project uses ES modules (`"type": "module"`) — use `import`, not `require` |
 | `ER_NOT_SUPPORTED_AUTH_MODE` | Old mysql2 vs MySQL 8 auth | `npm i mysql2@latest` |
 
+## Connecting the React frontend
+
+The web app **auto-detects** the API at startup:
+
+1. It pings `GET /api/health` (2.5 s timeout).
+2. If it answers → the header chip turns green **"MySQL · Live"** and every page
+   (dashboard, collection, sender, history, export, template) reads/writes
+   through the API. Status changes (opened / sent / failed / skipped) are
+   saved to `whatsapp_messages` in MySQL.
+3. If it doesn't → the chip shows amber **"Demo data"** and the app runs on
+   built-in sample data in localStorage. Click the chip (or *Retry connection*
+   in the sidebar) after starting the backend to re-check.
+
+Setup:
+
+```
+1. Replace backend/server.js with the latest version from this repo
+   (it adds dev-friendly CORS + /api/producers + /api/whatsapp/history-counts)
+2. In backend/.env: make the CORS_ORIGIN line empty  →  CORS_ORIGIN=
+   (an old value like http://localhost:5173 blocks the app if you serve it
+    from another port; empty = mirror any origin while developing)
+3. npm run dev   (backend on :3001)
+4. Serve/preview the React app; the chip should turn green within ~2 s
+```
+
+If the API runs on another host/port, create a `.env` in the **frontend**
+project root with:
+
+```
+VITE_API_URL=http://192.168.1.20:3001
+```
+
+and rebuild. Quick checks if the chip stays amber:
+
+- `curl http://localhost:3001/api/health` from a terminal → must return JSON
+- Browser devtools → Network → the health request must not be `CORS error`
+  (if it is, re-check the empty `CORS_ORIGIN` line and restart the backend)
+- Backend console must print `🥛 MilkPro API listening on http://localhost:3001`
+
 ## Security notes
 
 - Credentials live only in `.env` (never committed; add `.env` to `.gitignore`).

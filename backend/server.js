@@ -9,7 +9,9 @@ import "dotenv/config";
 import { pool, ping, safeConfig } from "./config/database.js";
 
 const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",") ?? "*" }));
+// Dev-friendly CORS: if CORS_ORIGIN is empty/unset, mirror any origin (incl. file://).
+const allow = String(process.env.CORS_ORIGIN || "").split(",").map((s) => s.trim()).filter(Boolean);
+app.use(cors(allow.length ? { origin: allow } : { origin: true, methods: ["GET", "POST", "PUT", "OPTIONS"] }));
 app.use(express.json({ limit: "64kb" }));
 
 /** Wrap async handlers so rejections hit the error middleware. */
@@ -216,6 +218,31 @@ app.put("/api/whatsapp/template", h(async (req, res) => {
     [template],
   );
   res.json({ saved: true });
+}));
+
+// ── Producer directory (read-only) ──────────────────────────────────────
+app.get("/api/producers", h(async (_req, res) => {
+  const [rows] = await pool.query(
+    `SELECT id, member_code AS code, name, phone FROM members WHERE status = 'active' ORDER BY name`,
+  );
+  res.json({ count: rows.length, rows });
+}));
+
+// ── History status counts (for dashboard chips) ─────────────────────────
+app.get("/api/whatsapp/history-counts", h(async (req, res) => {
+  const from = isDate(req.query.from) ? req.query.from : "1970-01-01";
+  const to = isDate(req.query.to) ? req.query.to : "2999-12-31";
+  const [rows] = await pool.query(
+    `SELECT wm.status, COUNT(*) AS n
+       FROM whatsapp_messages wm
+       JOIN milk_entries me ON me.id = wm.collection_id
+      WHERE me.entry_date BETWEEN ? AND ?
+      GROUP BY wm.status`,
+    [from, to],
+  );
+  const out = { pending: 0, opened: 0, sent: 0, failed: 0, skipped: 0 };
+  for (const r of rows) out[r.status] = Number(r.n);
+  res.json(out);
 }));
 
 // ── Errors ──────────────────────────────────────────────────────────────

@@ -3,8 +3,10 @@ import type { ReactNode } from "react";
 import { DEFAULT_TEMPLATE, getCollections, producerById, toISO } from "./data";
 import type { Collection, MsgStatus, Producer } from "./data";
 import { renderTemplate } from "./utils";
+import * as api from "./api";
 
 export type Route = "dashboard" | "collection" | "sender" | "history" | "templates" | "export" | "settings";
+export type DbMode = "checking" | "live" | "demo";
 
 export interface MsgRecord {
   id: string;
@@ -88,6 +90,9 @@ interface AppState {
   saveTemplate: (t: string) => void;
   savePrefs: (p: Prefs) => void;
   messageFor: (row: EnrichedRow) => string;
+  mode: DbMode;
+  refreshing: boolean;
+  reconnect: () => void;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -99,7 +104,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [template, setTemplate] = useState<string>(() => load(LS_TEMPLATE, DEFAULT_TEMPLATE));
   const [prefs, setPrefs] = useState<Prefs>(() => ({ ...DEFAULT_PREFS, ...load(LS_PREFS, {}) }));
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [mode, setMode] = useState<DbMode>("checking");
+  const [liveRows, setLiveRows] = useState<EnrichedRow[] | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const toastId = useRef(0);
+  const announced = useRef(false);
+  const modeRef = useRef<DbMode>("checking");
+  modeRef.current = mode;
 
   useEffect(() => {
     try {
@@ -121,20 +132,77 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
 
+  // ── live collection loader ───────────────────────────────────────────────
+  const loadLive = useCallback(
+    async (d: string, announceError = true) => {
+      setRefreshing(true);
+      const rows = await api.fetchCollection(d);
+      setRefreshing(false);
+      if (rows) {
+        setLiveRows(rows);
+        setMessages((prev) => {
+          const next = { ...prev };
+          for (const r of rows) if (r.msg) next[r.id] = r.msg;
+          return next;
+        });
+        return true;
+      }
+      if (announceError) toast("error", "Could not load collection from the API");
+      return false;
+    },
+    [toast],
+  );
+
+  // ── backend detection ────────────────────────────────────────────────────
+  const detect = useCallback(async () => {
+    setMode("checking");
+    const h = await api.health();
+    if (h) {
+      setMode("live");
+      const t = await api.fetchTemplate();
+      if (t) setTemplate(t);
+      void loadLive(date, false);
+      if (!announced.current) {
+        announced.current = true;
+        window.setTimeout(() => toast("success", `Connected to MySQL via MilkPro API (${api.API_BASE})`), 500);
+      }
+    } else {
+      setMode("demo");
+      setLiveRows(null);
+      if (!announced.current) {
+        announced.current = true;
+        window.setTimeout(() => toast("info", "API offline — running on demo data. Start the backend with `npm run dev`"), 500);
+      }
+    }
+  }, [date, loadLive, toast]);
+
+  useEffect(() => {
+    void detect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (mode === "live") void loadLive(date);
+  }, [mode, date, loadLive]);
+
+  // ── rows: live API rows (with optimistic local overlays) or demo data ────
   const rows: EnrichedRow[] = useMemo(() => {
-    const collections = getCollections(date);
-    return collections.map((c) => ({
+    if (mode === "live" && liveRows) {
+      return liveRows.map((r) => (messages[r.id] ? { ...r, msg: messages[r.id] } : r));
+    }
+    return getCollections(date).map((c) => ({
       ...c,
       producer: producerById.get(c.producerId)!,
       msg: messages[c.id],
     }));
-  }, [date, messages]);
+  }, [mode, liveRows, date, messages]);
 
   const messageFor = useCallback(
-    (row: EnrichedRow) => row.msg?.message ?? renderTemplate(template, row),
+    (row: EnrichedRow) => row.msg?.message || renderTemplate(template, row),
     [template],
   );
 
+  // ── status mutations (optimistic locally, mirrored to the API when live) ─
   const upsert = useCallback((collectionId: string, patch: Partial<MsgRecord>, require?: MsgRecord) => {
     setMessages((prev) => {
       const existing = prev[collectionId] ?? require;
@@ -156,13 +224,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
           collectionId: row.id,
           producerId: row.producerId,
           phone: row.producer.phone,
-          message: renderTemplate(template, row),
+          message: "",
           status: "pending",
           createdAt: now,
           updatedAt: now,
         };
-      const next = { ...record, status: "opened" as MsgStatus, openedAt: now, updatedAt: now };
+      // API rows carry no snapshot client-side — always render the template fresh.
+      const body = record.message || renderTemplate(template, row);
+      const next = { ...record, message: body, status: "opened" as MsgStatus, openedAt: now, updatedAt: now };
       setMessages((prev) => ({ ...prev, [row.id]: next }));
+      if (modeRef.current === "live") void api.postOpened(row.id, row.producer.phone, body);
       return next;
     },
     [messages, template],
@@ -171,24 +242,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const markSent = useCallback((id: string) => {
     const now = new Date().toISOString();
     upsert(id, { status: "sent", sentAt: now, error: undefined });
+    if (modeRef.current === "live") void api.postSent(id);
   }, [upsert]);
 
   const markFailed = useCallback((id: string, error: string) => {
     const now = new Date().toISOString();
     upsert(id, { status: "failed", failedAt: now, error });
+    if (modeRef.current === "live") void api.postFailed(id, error);
   }, [upsert]);
 
   const markSkipped = useCallback((id: string) => {
     const now = new Date().toISOString();
     upsert(id, { status: "skipped", skippedAt: now });
+    if (modeRef.current === "live") void api.postSkipped(id);
   }, [upsert]);
 
   const retryMsg = useCallback((id: string) => {
     upsert(id, { status: "pending", error: undefined, failedAt: undefined });
+    if (modeRef.current === "live") void api.postBulkStatus([id], "pending");
   }, [upsert]);
 
   const reopenMsg = useCallback((id: string) => {
     upsert(id, { status: "opened", openedAt: new Date().toISOString() });
+    if (modeRef.current === "live") void api.postOpened(id, "", "");
   }, [upsert]);
 
   const bulkMarkSent = useCallback((ids: string[]) => {
@@ -200,11 +276,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       return next;
     });
+    if (modeRef.current === "live") void api.postBulkStatus(ids, "sent");
   }, []);
 
   const clearMessages = useCallback(() => setMessages({}), []);
-  const saveTemplate = useCallback((t: string) => setTemplate(t), []);
+
+  const saveTemplate = useCallback((t: string) => {
+    setTemplate(t);
+    if (modeRef.current === "live") void api.putTemplate(t);
+  }, []);
+
   const savePrefs = useCallback((p: Prefs) => setPrefs(p), []);
+  const reconnect = useCallback(() => void detect(), [detect]);
 
   const value: AppState = {
     route,
@@ -229,6 +312,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     saveTemplate,
     savePrefs,
     messageFor,
+    mode,
+    refreshing,
+    reconnect,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

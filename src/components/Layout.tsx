@@ -28,6 +28,26 @@ const TITLES: Record<Route, { title: string; sub: string }> = {
   settings: { title: "Settings", sub: "Centre preferences & module configuration" },
 };
 
+function ModeChip() {
+  const { mode, reconnect, refreshing } = useApp();
+  const busy = mode === "checking" || refreshing;
+  return (
+    <button
+      onClick={() => { if (!busy) reconnect(); }}
+      title={mode === "live" ? "Connected to the MilkPro Express API + MySQL — click to re-check" : mode === "demo" ? "API not reachable — using built-in demo data. Click to retry connection." : "Checking API…"}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-extrabold transition-all duration-150",
+        mode === "live" && "border-wapp-400/40 bg-wapp-50 text-wapp-700 hover:bg-wapp-100",
+        mode === "demo" && "border-amber-300/50 bg-amber-50 text-amberish hover:bg-amber-100",
+        mode === "checking" && "border-stone-200 bg-white text-ink-soft",
+      )}
+    >
+      <span className={cn("h-2 w-2 rounded-full", mode === "live" && "bg-wapp-500 pulse-dot", mode === "demo" && "bg-amberish", mode === "checking" && "bg-stone-400 animate-pulse", busy && mode !== "checking" && "animate-pulse")} />
+      {mode === "live" ? "MySQL · Live" : mode === "demo" ? "Demo data" : "Connecting…"}
+    </button>
+  );
+}
+
 function Clock() {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -43,7 +63,7 @@ function Clock() {
 }
 
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
-  const { route, go, rows, prefs } = useApp();
+  const { route, go, rows, prefs, mode, reconnect } = useApp();
   const pending = rows.filter((r) => !r.msg || r.msg.status === "pending" || r.msg.status === "failed").length;
   return (
     <div className="flex h-full flex-col">
@@ -83,12 +103,23 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
       <div className="mx-3 mb-3 rounded-xl bg-white/5 p-3 ring-1 ring-white/10">
         <div className="flex items-center gap-2">
-          <span className="pulse-dot h-2 w-2 rounded-full bg-wapp-500" />
-          <p className="text-[11px] font-bold text-pine-100">MySQL · milk_db connected</p>
+          <span className={cn("h-2 w-2 rounded-full", mode === "live" ? "bg-wapp-500 pulse-dot" : mode === "demo" ? "bg-amberish" : "bg-stone-400 animate-pulse")} />
+          <p className="text-[11px] font-bold text-pine-100">
+            {mode === "live" ? "MySQL · connected" : mode === "demo" ? "Demo mode · local data" : "Connecting to API…"}
+          </p>
         </div>
         <p className="mt-1 text-[10.5px] leading-relaxed text-pine-300/80">
-          Read-only access · members, milk_entries, advances · centre: {prefs.centerName.split(" ").slice(0, 2).join(" ")}
+          {mode === "live"
+            ? "Read-only · members, milk_entries, advances · centre: " + prefs.centerName.split(" ").slice(0, 2).join(" ")
+            : mode === "demo"
+              ? "Backend offline — showing seeded sample data. Start it with `npm run dev` in /backend."
+              : "Probing http://localhost:3001 …"}
         </p>
+        {mode === "demo" && (
+          <button onClick={reconnect} className="mt-2 inline-flex items-center gap-1 rounded-md bg-white/10 px-2 py-1 text-[10.5px] font-bold text-wapp-400 transition-colors hover:bg-white/15">
+            <Icon name="refresh" size={11} /> Retry connection
+          </button>
+        )}
       </div>
 
       <div className="border-t border-white/10 px-5 py-3.5">
@@ -142,6 +173,7 @@ export function Layout({ children }: { children: ReactNode }) {
               <p className="hidden sm:block text-[11.5px] text-ink-soft truncate">{meta.sub}</p>
             </div>
             <Clock />
+            <ModeChip />
             <label className="relative inline-flex items-center">
               <Icon name="calendar" size={15} className="pointer-events-none absolute left-2.5 text-pine-600" />
               <input

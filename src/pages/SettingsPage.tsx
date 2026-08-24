@@ -6,7 +6,7 @@ import { Icon } from "../components/icons";
 import { Btn, ConfirmModal } from "../components/ui";
 
 export function SettingsPage() {
-  const { prefs, savePrefs, toast, clearMessages, messages, go } = useApp();
+  const { prefs, savePrefs, toast, clearMessages, messages, go, mode } = useApp();
   const [form, setForm] = useState<Prefs>(prefs);
   const [confirmClear, setConfirmClear] = useState(false);
 
@@ -85,8 +85,14 @@ export function SettingsPage() {
         <div className="anim-fade-up rounded-xl border border-stone-200/80 bg-white p-5 shadow-card" style={{ animationDelay: "120ms" }}>
           <h3 className="font-display text-base font-extrabold text-ink">Local message store</h3>
           <p className="mt-1 text-xs leading-relaxed text-ink-soft">
-            WhatsApp message statuses are tracked in a local <code className="rounded bg-stone-100 px-1 font-mono text-[10.5px]">whatsapp_messages</code> table
-            ({msgCount} record{msgCount === 1 ? "" : "s"}), one per producer per collection entry — duplicates are prevented by the collection id key.
+            WhatsApp message statuses are tracked in{" "}
+            {mode === "live" ? (
+              <>the <strong className="text-ink">MySQL</strong>{" "}
+                <code className="rounded bg-stone-100 px-1 font-mono text-[10.5px]">whatsapp_messages</code> table via the MilkPro API</>
+            ) : (
+              <>a local <code className="rounded bg-stone-100 px-1 font-mono text-[10.5px]">whatsapp_messages</code> store ({msgCount} record{msgCount === 1 ? "" : "s"})</>
+            )}
+            {" "}— one record per producer per collection entry; duplicates are prevented by the collection id key.
           </p>
           <div className="mt-3 space-y-1.5 rounded-lg bg-paper/60 p-3 font-mono text-[10.5px] leading-relaxed text-ink-soft ring-1 ring-stone-100">
             <p>id · producer_id · collection_id</p>
@@ -94,9 +100,16 @@ export function SettingsPage() {
             <p>opened_at · sent_at · failed_at</p>
             <p>error_message · created_at · updated_at</p>
           </div>
-          <Btn variant="danger" size="sm" icon="alert" className="mt-4 w-full" onClick={() => setConfirmClear(true)} disabled={msgCount === 0}>
-            Reset all statuses ({msgCount})
-          </Btn>
+          {mode === "live" ? (
+            <p className="mt-4 rounded-lg bg-wapp-50 px-3 py-2.5 text-[11.5px] font-semibold leading-relaxed text-wapp-700 ring-1 ring-wapp-100">
+              <Icon name="shield" size={13} className="mr-1 inline" />
+              Statuses live in MySQL — clear them from phpMyAdmin (TRUNCATE whatsapp_messages) if needed.
+            </p>
+          ) : (
+            <Btn variant="danger" size="sm" icon="alert" className="mt-4 w-full" onClick={() => setConfirmClear(true)} disabled={msgCount === 0}>
+              Reset all statuses ({msgCount})
+            </Btn>
+          )}
         </div>
 
         {/* integration card */}

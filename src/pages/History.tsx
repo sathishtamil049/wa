@@ -1,44 +1,61 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../lib/store";
 import { producerById, PRODUCERS } from "../lib/data";
 import type { MsgStatus } from "../lib/data";
 import { cn, copyText, fmtDate, fmtTime, waLink, STATUS_META } from "../lib/utils";
+import * as api from "../lib/api";
+import type { HistoryApiRow } from "../lib/api";
 import { Icon } from "../components/icons";
 import { Btn, StatusBadge, ShiftChip, EmptyState, Pagination, Avatar, Modal } from "../components/ui";
 import { WaBubble } from "../components/modals";
 
 const PAGE_SIZE = 8;
 
-interface HistoryRow {
-  id: string;
-  collectionId: string;
-  producerName: string;
-  producerCode: string;
-  phone: string;
-  date: string;
-  shift: "AM" | "PM";
-  message: string;
-  status: MsgStatus;
-  openedAt?: string;
-  sentAt?: string;
-  failedAt?: string;
-  error?: string;
-  updatedAt: string;
-}
-
 export function History() {
-  const { messages, toast, retryMsg, reopenMsg, prefs, go } = useApp();
+  const { messages, toast, retryMsg, reopenMsg, prefs, go, mode } = useApp();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [producerId, setProducerId] = useState<"ALL" | number>("ALL");
   const [status, setStatus] = useState<"ALL" | MsgStatus>("ALL");
   const [shift, setShift] = useState<"ALL" | "AM" | "PM">("ALL");
   const [page, setPage] = useState(1);
-  const [viewRow, setViewRow] = useState<HistoryRow | null>(null);
+  const [viewRow, setViewRow] = useState<HistoryApiRow | null>(null);
 
-  const all = useMemo<HistoryRow[]>(() => {
+  // ── live mode data ───────────────────────────────────────────────────────
+  const [liveRows, setLiveRows] = useState<HistoryApiRow[] | null>(null);
+  const [liveTotal, setLiveTotal] = useState(0);
+  const [liveCounts, setLiveCounts] = useState<Record<MsgStatus, number> | null>(null);
+  const [producers, setProducers] = useState<Array<{ id: number; code: string; name: string }> | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+
+  useEffect(() => {
+    if (mode !== "live") return;
+    let cancelled = false;
+    if (!producers) void api.fetchProducers().then((p) => { if (!cancelled && p) setProducers(p); });
+    return () => { cancelled = true; };
+  }, [mode, producers]);
+
+  useEffect(() => {
+    if (mode !== "live") return;
+    let cancelled = false;
+    setLiveLoading(true);
+    void Promise.all([
+      api.fetchHistory({ from: from || undefined, to: to || undefined, status, shift, producerId, page, limit: PAGE_SIZE }),
+      api.fetchHistoryCounts(from || undefined, to || undefined),
+    ]).then(([h, c]) => {
+      if (cancelled) return;
+      if (h) { setLiveRows(h.rows); setLiveTotal(h.total); }
+      if (c) setLiveCounts(c);
+      setLiveLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [mode, from, to, status, shift, producerId, page]);
+
+  // ── demo mode data (local store) ────────────────────────────────────────
+  const demoAll = useMemo<HistoryApiRow[]>(() => {
+    if (mode === "live") return [];
     return Object.values(messages)
-      .map((m) => {
+      .map((m): HistoryApiRow => {
         const [date, pid, sh] = m.collectionId.split("|");
         const p = producerById.get(Number(pid));
         return {
@@ -59,10 +76,10 @@ export function History() {
         };
       })
       .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-  }, [messages]);
+  }, [messages, mode]);
 
-  const filtered = useMemo(() => {
-    return all.filter((r) => {
+  const demoFiltered = useMemo(() => {
+    return demoAll.filter((r) => {
       if (from && r.date < from) return false;
       if (to && r.date > to) return false;
       if (producerId !== "ALL" && Number(r.collectionId.split("|")[1]) !== producerId) return false;
@@ -70,19 +87,28 @@ export function History() {
       if (shift !== "ALL" && r.shift !== shift) return false;
       return true;
     });
-  }, [all, from, to, producerId, status, shift]);
+  }, [demoAll, from, to, producerId, status, shift]);
 
-  const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage = Math.min(page, pages);
-  const pageRows = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  // ── unified view state ──────────────────────────────────────────────────
+  const isLive = mode === "live";
+  const rowsShown: HistoryApiRow[] = isLive ? (liveRows ?? []) : demoFiltered;
+  const total = isLive ? liveTotal : demoFiltered.length;
+  const pages = isLive ? Math.max(1, Math.ceil(total / PAGE_SIZE)) : Math.max(1, Math.ceil(demoFiltered.length / PAGE_SIZE));
+  const safePage = isLive ? page : Math.min(page, pages);
+  const pageRows = isLive ? rowsShown : demoFiltered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
-  const counts = useMemo(() => {
+  const counts = useMemo<Record<MsgStatus, number>>(() => {
+    if (isLive && liveCounts) return liveCounts;
     const c: Record<MsgStatus, number> = { pending: 0, opened: 0, sent: 0, failed: 0, skipped: 0 };
-    for (const r of all) c[r.status]++;
+    for (const r of demoAll) c[r.status]++;
     return c;
-  }, [all]);
+  }, [isLive, liveCounts, demoAll]);
 
-  const openChat = (r: HistoryRow) => {
+  const producerOptions = isLive
+    ? (producers ?? []).map((p) => ({ id: p.id, label: p.name }))
+    : PRODUCERS.map((p) => ({ id: p.id, label: p.name }));
+
+  const openChat = (r: HistoryApiRow) => {
     reopenMsg(r.collectionId);
     window.open(waLink(r.phone, prefs.countryCode, r.message), "_blank", "noopener");
     toast("info", `WhatsApp reopened for ${r.producerName}`);
@@ -99,7 +125,7 @@ export function History() {
             <span className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-ink-soft">
               <span className={cn("h-1.5 w-1.5 rounded-full", STATUS_META[s].dot)} /> {STATUS_META[s].label}
             </span>
-            <span className="font-display mt-1 block text-xl font-extrabold text-ink tnum">{counts[s]}</span>
+            <span className="font-display mt-1 block text-xl font-extrabold text-ink tnum">{liveLoading && isLive && !liveCounts ? "…" : counts[s]}</span>
           </button>
         ))}
       </div>
@@ -115,24 +141,26 @@ export function History() {
         <select value={producerId} onChange={(e) => { setProducerId(e.target.value === "ALL" ? "ALL" : Number(e.target.value)); setPage(1); }}
           className="h-9 rounded-lg border border-stone-200 bg-white px-2 text-xs font-bold text-ink focus:border-pine-500 focus:outline-none">
           <option value="ALL">All producers</option>
-          {PRODUCERS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          {producerOptions.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
         </select>
         <select value={shift} onChange={(e) => { setShift(e.target.value as "ALL" | "AM" | "PM"); setPage(1); }}
           className="h-9 rounded-lg border border-stone-200 bg-white px-2 text-xs font-bold text-ink focus:border-pine-500 focus:outline-none">
           <option value="ALL">Both shifts</option><option value="AM">AM</option><option value="PM">PM</option>
         </select>
         <Btn variant="ghost" size="sm" icon="refresh" onClick={() => { setFrom(""); setTo(""); setProducerId("ALL"); setStatus("ALL"); setShift("ALL"); setPage(1); }}>Reset</Btn>
-        <span className="ml-auto text-xs font-bold text-ink-soft tnum">{filtered.length} records</span>
+        <span className="ml-auto text-xs font-bold text-ink-soft tnum">
+          {isLive && liveLoading ? "Querying MySQL…" : `${total} records${isLive ? " · MySQL" : " · local"}`}
+        </span>
       </div>
 
       {/* table */}
-      {filtered.length === 0 ? (
-        <EmptyState icon="history" title={all.length === 0 ? "No messages tracked yet" : "Nothing matches these filters"}
-          desc={all.length === 0 ? "Open WhatsApp chats from the Sender — every open, send, failure and skip lands here with timestamps." : "Loosen the date range or clear the filters to see more."}
-          action={all.length === 0 ? <Btn variant="wapp" icon="whatsapp" onClick={() => go("sender")}>Open WhatsApp Sender</Btn> : undefined} />
+      {pageRows.length === 0 && !liveLoading ? (
+        <EmptyState icon="history" title={total === 0 && !isLive && demoAll.length === 0 ? "No messages tracked yet" : "Nothing matches these filters"}
+          desc={total === 0 && !isLive && demoAll.length === 0 ? "Open WhatsApp chats from the Sender — every open, send, failure and skip lands here with timestamps." : "Loosen the date range or clear the filters to see more."}
+          action={total === 0 && !isLive && demoAll.length === 0 ? <Btn variant="wapp" icon="whatsapp" onClick={() => go("sender")}>Open WhatsApp Sender</Btn> : undefined} />
       ) : (
         <div className="anim-fade-up overflow-hidden rounded-xl border border-stone-200/80 bg-white shadow-card" style={{ animationDelay: "140ms" }}>
-          <div className="overflow-x-auto">
+          <div className={cn("overflow-x-auto transition-opacity duration-200", liveLoading && "opacity-50 pointer-events-none")}>
             <table className="w-full min-w-[880px] text-left text-[13px]">
               <thead>
                 <tr className="border-b border-stone-200 bg-stone-50/80 text-[10.5px] uppercase tracking-[0.08em] text-ink-soft">
@@ -186,7 +214,7 @@ export function History() {
             </table>
           </div>
           <div className="border-t border-stone-100 px-3 pb-3">
-            <Pagination page={safePage} pages={pages} onPage={setPage} shown={pageRows.length} total={filtered.length} />
+            <Pagination page={safePage} pages={pages} onPage={setPage} shown={pageRows.length} total={total} />
           </div>
         </div>
       )}
