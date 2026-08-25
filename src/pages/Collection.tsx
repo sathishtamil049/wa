@@ -2,15 +2,15 @@ import { useMemo, useState } from "react";
 import { useApp } from "../lib/store";
 import type { EnrichedRow } from "../lib/store";
 import type { MsgStatus } from "../lib/data";
-import { PRODUCERS } from "../lib/data";
+import { r1, r2, suggestRate, toISO } from "../lib/data";
 import { cn, copyText, fmtDate, inr, qty, waLink, STATUS_META } from "../lib/utils";
 import { exportRowsToXlsx, EXPORT_FIELDS } from "../lib/excel";
 import { Icon } from "../components/icons";
-import { Btn, IconBtn, StatusBadge, ShiftChip, EmptyState, Avatar } from "../components/ui";
+import { Btn, IconBtn, StatusBadge, ShiftChip, EmptyState, Avatar, Modal, ConfirmModal } from "../components/ui";
 import { MessagePreviewModal, ProducerModal } from "../components/modals";
 
 export function Collection() {
-  const { rows, date, openMsg, markSent, retryMsg, bulkMarkSent, toast, messageFor, prefs } = useApp();
+  const { rows, date, openMsg, markSent, retryMsg, bulkMarkSent, toast, messageFor, prefs, producers, addEntry, updateEntry, removeEntry, mode } = useApp();
   const [search, setSearch] = useState("");
   const [shift, setShift] = useState<"ALL" | "AM" | "PM">("ALL");
   const [status, setStatus] = useState<"ALL" | MsgStatus>("ALL");
@@ -18,6 +18,8 @@ export function Collection() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [previewRow, setPreviewRow] = useState<EnrichedRow | null>(null);
   const [producerModal, setProducerModal] = useState<number | null>(null);
+  const [entryForm, setEntryForm] = useState<EnrichedRow | "new" | null>(null);
+  const [deleteRow, setDeleteRow] = useState<EnrichedRow | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -82,7 +84,7 @@ export function Collection() {
           <select value={producerId} onChange={(e) => setProducerId(e.target.value === "ALL" ? "ALL" : Number(e.target.value))}
             className="h-9.5 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-bold text-ink focus:border-pine-500 focus:outline-none">
             <option value="ALL">All producers</option>
-            {PRODUCERS.map((p) => <option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
+            {producers.filter((p) => p.status === "active").map((p) => <option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
           </select>
           <select value={status} onChange={(e) => setStatus(e.target.value as "ALL" | MsgStatus)}
             className="h-9.5 rounded-lg border border-stone-200 bg-white px-2.5 text-xs font-bold text-ink focus:border-pine-500 focus:outline-none">
@@ -90,9 +92,10 @@ export function Collection() {
             {(Object.keys(STATUS_META) as MsgStatus[]).map((s) => <option key={s} value={s}>{STATUS_META[s].label}</option>)}
           </select>
           <Btn variant="ghost" size="sm" icon="refresh" onClick={() => { setSearch(""); setShift("ALL"); setStatus("ALL"); setProducerId("ALL"); }}>Reset</Btn>
-          <span className="ml-auto hidden items-center gap-1.5 rounded-lg bg-pine-50 px-2.5 py-1.5 text-xs font-bold text-pine-800 sm:inline-flex tnum">
+          <span className="hidden items-center gap-1.5 rounded-lg bg-pine-50 px-2.5 py-1.5 text-xs font-bold text-pine-800 sm:inline-flex tnum">
             <Icon name="filter" size={13} /> {filtered.length} of {rows.length} entries
           </span>
+          <Btn variant="primary" icon="plus" className="ml-auto" onClick={() => setEntryForm("new")}>Add entry</Btn>
         </div>
       </div>
 
@@ -150,7 +153,8 @@ export function Collection() {
                         <IconBtn icon="copy" label="Copy message" onClick={() => void copyMessage(r)} />
                         <IconBtn icon="check" label="Mark sent" tone="pine" disabled={st === "sent"} onClick={() => { markSent(r.id); toast("success", `${r.producer.name} marked as Sent`); }} />
                         <IconBtn icon="refresh" label="Retry" tone="danger" disabled={st !== "failed"} onClick={() => { retryMsg(r.id); toast("info", `${r.producer.name} reset to Pending`); }} />
-                        <IconBtn icon="user" label="View producer" onClick={() => setProducerModal(r.producerId)} />
+                        <IconBtn icon="pencil" label="Edit entry" tone="pine" onClick={() => setEntryForm(r)} />
+                        <IconBtn icon="trash" label="Delete entry" tone="danger" onClick={() => setDeleteRow(r)} />
                       </span>
                     </td>
                   </tr>
@@ -212,8 +216,8 @@ export function Collection() {
               <div className="mt-3 flex gap-2">
                 <Btn variant="wapp" size="sm" icon="whatsapp" className="flex-1" onClick={() => openWhatsApp(r)}>Open WhatsApp</Btn>
                 <Btn variant="outline" size="sm" icon="copy" onClick={() => void copyMessage(r)}>Copy</Btn>
-                <IconBtn icon="eye" label="Preview message" tone="pine" onClick={() => setPreviewRow(r)} />
-                <IconBtn icon="check" label="Mark sent" tone="pine" disabled={st === "sent"} onClick={() => { markSent(r.id); toast("success", `${r.producer.name} marked as Sent`); }} />
+                <IconBtn icon="pencil" label="Edit entry" tone="pine" onClick={() => setEntryForm(r)} />
+                <IconBtn icon="trash" label="Delete entry" tone="danger" onClick={() => setDeleteRow(r)} />
               </div>
             </div>
           );
@@ -241,6 +245,145 @@ export function Collection() {
 
       <MessagePreviewModal row={previewRow} open={previewRow !== null} onClose={() => setPreviewRow(null)} />
       <ProducerModal producerId={producerModal} open={producerModal !== null} onClose={() => setProducerModal(null)} />
+      <EntryFormModal initial={entryForm} onClose={() => setEntryForm(null)} />
+      <ConfirmModal
+        open={deleteRow !== null}
+        onClose={() => setDeleteRow(null)}
+        onConfirm={async () => {
+          if (!deleteRow) return;
+          const err = await removeEntry(deleteRow.id);
+          if (err) toast("error", err);
+        }}
+        title="Delete this milk entry?"
+        confirmLabel="Delete entry"
+        danger
+        body={deleteRow ? (
+          <span>
+            <strong>{deleteRow.producer.name}</strong> · {fmtDate(deleteRow.date)} · {deleteRow.shift} shift ·{" "}
+            <strong className="tnum">{qty(deleteRow.milkLtr)} L ({inr(deleteRow.amount)})</strong> will be removed
+            {mode === "live" ? " from the milk_entries table" : " from demo data"}, along with its WhatsApp tracking record. This cannot be undone.
+          </span>
+        ) : null}
+      />
     </div>
+  );
+}
+
+// ── Add / edit milk entry form ────────────────────────────────────────────
+function EntryFormModal({ initial, onClose }: { initial: EnrichedRow | "new" | null; onClose: () => void }) {
+  const { producers, date, addEntry, updateEntry, toast, mode } = useApp();
+  const editing = initial !== null && initial !== "new" ? initial : null;
+  const [producerId, setProducerId] = useState(0);
+  const [fDate, setFDate] = useState(date);
+  const [shift, setShift] = useState<"AM" | "PM">("AM");
+  const [ltr, setLtr] = useState("");
+  const [fat, setFat] = useState("");
+  const [snf, setSnf] = useState("");
+  const [rate, setRate] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [seeded, setSeeded] = useState<string | null>(null);
+
+  const key = initial === null ? null : initial === "new" ? "new" : initial.id;
+  if (key !== seeded) {
+    setSeeded(key);
+    setError("");
+    if (editing) {
+      setProducerId(editing.producerId); setFDate(editing.date); setShift(editing.shift);
+      setLtr(String(editing.milkLtr)); setFat(String(editing.fat)); setSnf(String(editing.snf)); setRate(String(editing.rate));
+    } else {
+      const first = producers.find((p) => p.status === "active");
+      setProducerId(first?.id ?? 0); setFDate(date); setShift("AM");
+      setLtr(""); setFat(""); setSnf(""); setRate("");
+    }
+  }
+
+  const nLtr = parseFloat(ltr), nFat = parseFloat(fat), nSnf = parseFloat(snf), nRate = parseFloat(rate);
+  const amount = Number.isFinite(nLtr) && Number.isFinite(nRate) ? r2(nLtr * nRate) : 0;
+
+  const autoRate = () => {
+    if (Number.isFinite(nFat) && Number.isFinite(nSnf)) {
+      setRate(String(suggestRate(nFat, nSnf)));
+    } else {
+      setError("Enter FAT and SNF first, then press Auto rate");
+    }
+  };
+
+  const submit = async () => {
+    if (!producerId) return setError("Choose a producer");
+    if (!(nLtr > 0 && nLtr <= 5000)) return setError("Milk litres must be between 0.1 and 5000");
+    if (!(nFat >= 0 && nFat <= 15)) return setError("FAT must be between 0 and 15");
+    if (!(nSnf >= 0 && nSnf <= 15)) return setError("SNF must be between 0 and 15");
+    if (!(nRate > 0 && nRate <= 1000)) return setError("Rate must be between ₹0.01 and ₹1000");
+    setSaving(true);
+    const payload = { producerId, date: fDate, shift, milkLtr: r1(nLtr), fat: r1(nFat), snf: r1(nSnf), rate: r2(nRate) };
+    const err = editing ? await updateEntry(editing.id, payload) : await addEntry(payload);
+    setSaving(false);
+    if (err) { setError(err); return; }
+    onClose();
+  };
+
+  const fld = "h-10 w-full rounded-lg border border-stone-200 bg-white px-3 text-sm font-semibold text-ink transition-colors focus:border-pine-500 focus:outline-none focus:ring-2 focus:ring-pine-100 tnum";
+
+  return (
+    <Modal open={initial !== null} onClose={onClose}
+      title={editing ? `Edit entry — ${editing.producer.name}` : "Add milk entry"}
+      subtitle={editing ? `#${editing.id} · changes are recomputed and saved` : `Records a ${mode === "live" ? "new row in milk_entries" : "demo entry"} for the selected day`}
+      width="max-w-xl"
+      footer={<>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="primary" icon="check" onClick={submit} disabled={saving}>
+          {saving ? "Saving…" : editing ? "Save changes" : "Add entry"}
+        </Btn>
+      </>}>
+      <div className="grid gap-3.5 sm:grid-cols-2">
+        <label className="block text-xs font-bold text-ink-soft sm:col-span-1">Producer
+          <select value={producerId} onChange={(e) => setProducerId(Number(e.target.value))} className={cn(fld, "mt-1")} disabled={!!editing}>
+            <option value={0}>Choose…</option>
+            {producers.filter((p) => p.status === "active").map((p) => <option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
+          </select>
+        </label>
+        <label className="block text-xs font-bold text-ink-soft">Date
+          <input type="date" value={fDate} max={toISO(new Date())} onChange={(e) => e.target.value && setFDate(e.target.value)} className={cn(fld, "mt-1")} />
+        </label>
+        <div className="text-xs font-bold text-ink-soft sm:col-span-2">Shift
+          <div className="mt-1 flex rounded-lg border border-stone-200 bg-paper/60 p-0.5">
+            {(["AM", "PM"] as const).map((s) => (
+              <button key={s} onClick={() => setShift(s)} className={cn("flex-1 rounded-md px-3 py-2 text-xs font-bold transition-all", shift === s ? "bg-pine-700 text-white shadow-sm" : "text-ink-soft hover:text-pine-700")}>
+                {s === "AM" ? "☀ Morning (AM)" : "☾ Evening (PM)"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="block text-xs font-bold text-ink-soft">Milk (Ltr)
+          <input value={ltr} onChange={(e) => setLtr(e.target.value)} inputMode="decimal" placeholder="12.5" className={cn(fld, "mt-1")} />
+        </label>
+        <label className="block text-xs font-bold text-ink-soft">Rate (₹/Ltr)
+          <span className="mt-1 flex gap-1.5">
+            <input value={rate} onChange={(e) => setRate(e.target.value)} inputMode="decimal" placeholder="42.50" className={fld} />
+            <button onClick={autoRate} className="shrink-0 rounded-lg border border-pine-200 bg-pine-50 px-2.5 text-[11px] font-extrabold text-pine-700 transition-colors hover:bg-pine-100">Auto</button>
+          </span>
+        </label>
+        <label className="block text-xs font-bold text-ink-soft">FAT %
+          <input value={fat} onChange={(e) => setFat(e.target.value)} inputMode="decimal" placeholder="4.6" className={cn(fld, "mt-1")} />
+        </label>
+        <label className="block text-xs font-bold text-ink-soft">SNF %
+          <input value={snf} onChange={(e) => setSnf(e.target.value)} inputMode="decimal" placeholder="8.6" className={cn(fld, "mt-1")} />
+        </label>
+      </div>
+      <div className="mt-4 flex items-center justify-between rounded-xl bg-pine-950 px-4 py-3 text-white" style={{ backgroundImage: "radial-gradient(300px 120px at 90% -40%, rgb(37 211 102 / 0.25), transparent)" }}>
+        <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-pine-300">Milk amount</span>
+        <span className="font-display text-xl font-extrabold tnum">{inr(amount)}</span>
+      </div>
+      <p className="mt-2 text-[11px] text-ink-soft">
+        <Icon name="info" size={12} className="mr-1 inline text-pine-600" />
+        Amount = Milk × Rate, recomputed automatically. Advance deductions come from the advances table and are never edited here.
+      </p>
+      {error && (
+        <p className="anim-fade-up mt-3 flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2.5 text-xs font-bold text-danger ring-1 ring-red-200">
+          <Icon name="alert" size={14} /> {error}
+        </p>
+      )}
+    </Modal>
   );
 }

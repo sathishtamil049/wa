@@ -5,7 +5,8 @@ export type IconName =
   | "search" | "copy" | "check" | "x" | "chevron-left" | "chevron-right" | "chevron-down"
   | "external" | "refresh" | "eye" | "download" | "calendar" | "phone" | "user" | "users"
   | "send" | "alert" | "inbox" | "filter" | "pencil" | "clock" | "rupee" | "arrow-up"
-  | "arrow-down" | "check-circle" | "x-circle" | "info" | "shield" | "milk-can" | "list";
+  | "arrow-down" | "check-circle" | "x-circle" | "info" | "shield" | "milk-can" | "list"
+  | "plus" | "trash" | "archive";
 
 const STROKE: Record<string, ReactNode> = {
   dashboard: (<><rect x="3" y="3" width="8" height="10" rx="1.5" /><rect x="13" y="3" width="8" height="6" rx="1.5" /><rect x="13" y="11" width="8" height="10" rx="1.5" /><rect x="3" y="15" width="8" height="6" rx="1.5" /></>),
@@ -44,6 +45,9 @@ const STROKE: Record<string, ReactNode> = {
   shield: <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />,
   "milk-can": (<><path d="M9 2h6" /><path d="M9.5 2v2.2L7 8v11a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V8l-2.5-3.8V2" /><path d="M7 12c2-1.4 3.2 1.2 5 0s3-1.4 5 0" /></>),
   list: (<><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></>),
+  plus: (<><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></>),
+  trash: (<><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></>),
+  archive: (<><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" /></>),
 };
 
 const WA_PATH =

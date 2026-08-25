@@ -20,9 +20,16 @@ CREATE TABLE IF NOT EXISTS members (
   member_code  VARCHAR(20)  NOT NULL UNIQUE,
   name         VARCHAR(100) NOT NULL,
   phone        VARCHAR(15)  NOT NULL,          -- digits only, no country code
+  village      VARCHAR(60)  NULL,
+  animal       ENUM('Buffalo','Cow','Mixed') NOT NULL DEFAULT 'Mixed',
   status       ENUM('active','inactive') NOT NULL DEFAULT 'active',
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
+
+-- If `members` already exists in your live database, add the new columns
+-- (ignore "Duplicate column name" errors — they mean it's already there):
+-- ALTER TABLE members ADD COLUMN village VARCHAR(60) NULL;
+-- ALTER TABLE members ADD COLUMN animal ENUM('Buffalo','Cow','Mixed') NOT NULL DEFAULT 'Mixed';
 
 CREATE TABLE IF NOT EXISTS milk_entries (
   id           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

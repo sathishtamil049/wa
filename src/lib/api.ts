@@ -79,10 +79,71 @@ export async function health(): Promise<{ db?: Record<string, unknown> } | null>
   return j?.status === "ok" ? { db: j.db } : null;
 }
 
-export async function fetchProducers(): Promise<Array<{ id: number; code: string; name: string; phone: string }> | null> {
-  const j = await req<{ rows?: Array<{ id: number; code: string; name: string; phone: string }> }>("/api/producers");
+export interface ProducerApi {
+  id: number;
+  code: string;
+  name: string;
+  phone: string;
+  village?: string | null;
+  animal?: "Buffalo" | "Cow" | "Mixed";
+  status?: "active" | "inactive";
+  joined?: string;
+  entries_today?: number;
+}
+
+export async function fetchProducers(includeInactive = true): Promise<ProducerApi[] | null> {
+  const j = await req<{ rows?: ProducerApi[] }>(`/api/producers${includeInactive ? "?all=1" : ""}`);
   return j?.rows ?? null;
 }
+
+export interface MutationResult { ok: boolean; id?: number; error?: string }
+
+async function mutate(path: string, init: RequestInit): Promise<MutationResult> {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      ...init,
+    });
+    const body = (await res.json().catch(() => ({}))) as { error?: string; id?: number };
+    if (!res.ok) return { ok: false, error: body?.error ?? `Request failed (HTTP ${res.status})` };
+    return { ok: true, id: body?.id };
+  } catch {
+    return { ok: false, error: "Network error — is the API running?" };
+  }
+}
+
+export interface ProducerInput {
+  name: string;
+  code: string;
+  phone: string;
+  village?: string | null;
+  animal?: "Buffalo" | "Cow" | "Mixed";
+  status?: "active" | "inactive";
+}
+
+export const createProducer = (p: ProducerInput) =>
+  mutate("/api/producers", { method: "POST", body: JSON.stringify(p) });
+export const updateProducer = (id: number, p: ProducerInput) =>
+  mutate(`/api/producers/${id}`, { method: "PUT", body: JSON.stringify(p) });
+export const deleteProducer = (id: number, hard = false) =>
+  mutate(`/api/producers/${id}${hard ? "?hard=1" : ""}`, { method: "DELETE" });
+
+export interface EntryInput {
+  member_id: number;
+  entry_date: string;
+  shift: "AM" | "PM";
+  milk_ltr: number;
+  fat: number;
+  snf: number;
+  rate_per_ltr: number;
+}
+
+export const createEntry = (e: EntryInput) =>
+  mutate("/api/collection", { method: "POST", body: JSON.stringify(e) });
+export const updateEntry = (id: string, e: EntryInput) =>
+  mutate(`/api/collection/${id}`, { method: "PUT", body: JSON.stringify(e) });
+export const deleteEntry = (id: string) =>
+  mutate(`/api/collection/${id}`, { method: "DELETE" });
 
 // ── collection ─────────────────────────────────────────────────────────────
 interface ApiCollectionRow {
@@ -228,77 +289,4 @@ export async function putTemplate(template: string): Promise<boolean> {
   return j?.saved === true;
 }
 
-// ── CRUD: like `req` but also parses error bodies on 4xx ──────────────────
-interface CrudResult {
-  ok: boolean;
-  status: number;
-  data: Record<string, unknown>;
-}
 
-async function crud(path: string, init?: RequestInit): Promise<CrudResult | null> {
-  const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), 6000);
-  try {
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      signal: ctrl.signal,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    });
-    let data: Record<string, unknown> = {};
-    try {
-      data = (await res.json()) as Record<string, unknown>;
-    } catch {
-      /* non-JSON body */
-    }
-    return { ok: res.ok, status: res.status, data };
-  } catch {
-    return null;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
-
-export interface MemberApi {
-  id: number;
-  code: string;
-  name: string;
-  phone: string;
-  status: "active" | "inactive";
-  entries: number;
-}
-
-export interface MemberInput {
-  code: string;
-  name: string;
-  phone: string;
-  status: "active" | "inactive";
-}
-
-export interface EntryInput {
-  member_id: number;
-  entry_date: string;
-  shift: "AM" | "PM";
-  milk_ltr: number;
-  fat: number;
-  snf: number;
-  rate_per_ltr: number;
-  advance: number;
-}
-
-export async function fetchMembers(q = "", status: "ALL" | "active" | "inactive" = "ALL"): Promise<MemberApi[] | null> {
-  const p = new URLSearchParams();
-  if (q) p.set("q", q);
-  if (status !== "ALL") p.set("status", status);
-  const j = await req<{ rows?: MemberApi[] }>(`/api/members?${p.toString()}`);
-  return j?.rows ?? null;
-}
-
-export const createMember = (body: MemberInput) => crud("/api/members", { method: "POST", body: JSON.stringify(body) });
-export const updateMember = (id: number, body: MemberInput) =>
-  crud(`/api/members/${id}`, { method: "PUT", body: JSON.stringify(body) });
-export const deleteMember = (id: number) => crud(`/api/members/${id}`, { method: "DELETE" });
-
-export const createMilkEntry = (body: EntryInput) => crud("/api/milk-entries", { method: "POST", body: JSON.stringify(body) });
-export const updateMilkEntry = (id: number, body: EntryInput) =>
-  crud(`/api/milk-entries/${id}`, { method: "PUT", body: JSON.stringify(body) });
-export const deleteMilkEntry = (id: number) => crud(`/api/milk-entries/${id}`, { method: "DELETE" });
