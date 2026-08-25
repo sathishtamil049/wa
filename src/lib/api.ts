@@ -7,7 +7,20 @@ import type { MsgStatus } from "./data";
 import type { EnrichedRow, MsgRecord } from "./store";
 
 const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
-export const API_BASE: string = (env.VITE_API_URL ?? "http://localhost:3001").replace(/\/+$/, "");
+
+// Runtime override: edit /config.js (public/config.js in this repo) to point
+// at a different API without rebuilding — handy for cPanel uploads.
+declare global {
+  interface Window {
+    __MILKPRO_API__?: string;
+  }
+}
+
+export const API_BASE: string = (
+  (typeof window !== "undefined" && window.__MILKPRO_API__) ||
+  env.VITE_API_URL ||
+  "http://localhost:3001"
+).replace(/\/+$/, "");
 
 export interface HistoryApiRow {
   id: string;
