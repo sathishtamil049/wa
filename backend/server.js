@@ -136,12 +136,12 @@ app.get("/api/diagnose", h(async (_req, res) => {
 app.get("/api/dashboard", h(async (req, res) => {
   const date = isDate(req.query.date) ? req.query.date : today();
   const [rows] = await pool.query(
-    `SELECT COUNT(DISTINCT me.member_id)                        AS producers,
-            COUNT(*)                                            AS entries,
-            COALESCE(SUM(me.milk_ltr), 0)                       AS litres,
-            COALESCE(SUM(me.amount), 0)                         AS amount,
-            COALESCE(SUM(COALESCE(a.amount, 0)), 0)             AS advance,
-            COALESCE(SUM(me.amount - COALESCE(a.amount, 0)), 0) AS net,
+    `SELECT COUNT(DISTINCT me.member_id)                                          AS producers,
+            COUNT(*)                                                              AS entries,
+            COALESCE(SUM(me.milk_ltr), 0)                                         AS litres,
+            COALESCE(SUM(me.milk_ltr * me.rate_per_ltr), 0)                       AS amount,
+            COALESCE(SUM(COALESCE(a.amount, 0)), 0)                               AS advance,
+            COALESCE(SUM(me.milk_ltr * me.rate_per_ltr - COALESCE(a.amount, 0)), 0) AS net,
             SUM(wm.status IS NULL OR wm.status = 'pending')     AS pending,
             SUM(wm.status = 'opened')                           AS opened,
             SUM(wm.status = 'sent')                             AS sent,
@@ -167,9 +167,10 @@ app.get("/api/collection", h(async (req, res) => {
     `SELECT me.id            AS collection_id,
             m.id             AS producer_id,
             m.member_code, m.name, m.phone,
-            me.entry_date, me.shift, me.milk_ltr, me.fat, me.snf, me.rate_per_ltr, me.amount,
-            COALESCE(a.amount, 0)                    AS advance_deduction,
-            (me.amount - COALESCE(a.amount, 0))      AS net_payable,
+            me.entry_date, me.shift, me.milk_ltr, me.fat, me.snf, me.rate_per_ltr,
+            (me.milk_ltr * me.rate_per_ltr)                    AS amount,
+            COALESCE(a.amount, 0)                              AS advance_deduction,
+            (me.milk_ltr * me.rate_per_ltr - COALESCE(a.amount, 0)) AS net_payable,
             COALESCE(wm.status, 'pending')           AS wa_status,
             wm.opened_at, wm.sent_at, wm.failed_at, wm.error_message
      FROM milk_entries me
@@ -203,12 +204,27 @@ app.get("/api/inspect", h(async (_req, res) => {
   res.json(report);
 }));
 
+// ── Schema adaptation ─────────────────────────────────────────────────────
+// Existing databases store the join date in `joined_on`; the bundled
+// schema.sql used `created_at`. Detect once at boot and adapt the queries.
+let JOINED_COL = null; // "joined_on" | "created_at" | null
+async function detectColumns() {
+  try {
+    const [cols] = await pool.query("SHOW COLUMNS FROM members");
+    const names = cols.map((c) => c.Field);
+    JOINED_COL = names.includes("joined_on") ? "joined_on" : names.includes("created_at") ? "created_at" : null;
+    console.log(`[schema] members join-date column: ${JOINED_COL ?? "none"}`);
+  } catch { JOINED_COL = null; }
+}
+const joinedSelect = () =>
+  JOINED_COL === "joined_on" ? "m.joined_on" : JOINED_COL === "created_at" ? "DATE(m.created_at)" : "NULL";
+
 // ── Producer directory + CRUD ─────────────────────────────────────────────
 app.get("/api/producers", h(async (req, res) => {
   const all = req.query.all === "1";
   const [rows] = await pool.query(
     `SELECT m.id, m.member_code AS code, m.name, m.phone, m.village, m.animal, m.status,
-            DATE(m.created_at) AS joined,
+            ${joinedSelect()} AS joined,
             (SELECT COUNT(*) FROM milk_entries me WHERE me.member_id = m.id AND me.entry_date = CURDATE()) AS entries_today
      FROM members m ${all ? "" : "WHERE m.status = 'active'"}
      ORDER BY m.name`,
@@ -234,10 +250,17 @@ app.post("/api/producers", h(async (req, res) => {
   const [dup] = await pool.query(
     "SELECT id FROM members WHERE member_code = ? OR phone = ? LIMIT 1", [v.code, v.phone]);
   if (dup.length) return res.status(409).json({ error: "A producer with this code or phone already exists" });
-  const [r] = await pool.query(
-    "INSERT INTO members (member_code, name, phone, village, animal, status) VALUES (?, ?, ?, ?, ?, 'active')",
-    [v.code, v.name, v.phone, v.village, v.animal]);
-  res.status(201).json({ id: r.insertId, ...v, status: "active" });
+  // village is NOT NULL in some live databases → send '' instead of NULL
+  const village = v.village ?? "";
+  const cols = JOINED_COL === "joined_on"
+    ? "(member_code, name, phone, village, animal, status, joined_on)"
+    : "(member_code, name, phone, village, animal, status)";
+  const vals = JOINED_COL === "joined_on"
+    ? "VALUES (?, ?, ?, ?, ?, 'active', CURDATE())"
+    : "VALUES (?, ?, ?, ?, ?, 'active')";
+  const [r] = await pool.query(`INSERT INTO members ${cols} ${vals}`,
+    [v.code, v.name, v.phone, village, v.animal]);
+  res.status(201).json({ id: r.insertId, ...v, village, status: "active" });
 }));
 
 app.put("/api/producers/:id", h(async (req, res) => {
@@ -251,7 +274,7 @@ app.put("/api/producers/:id", h(async (req, res) => {
   if (dup.length) return res.status(409).json({ error: "Another producer already uses this code or phone" });
   await pool.query(
     "UPDATE members SET member_code = ?, name = ?, phone = ?, village = ?, animal = ?, status = ? WHERE id = ?",
-    [v.code, v.name, v.phone, v.village, v.animal, status, id]);
+    [v.code, v.name, v.phone, v.village ?? "", v.animal, status, id]);
   res.json({ id, ...v, status });
 }));
 
@@ -292,12 +315,17 @@ const entryRules = (b) => {
 app.post("/api/collection", h(async (req, res) => {
   const v = entryRules(req.body);
   if (v.error) return res.status(400).json(v);
+  // Explicit duplicate guard — works even if the table has no unique key
+  const [exists] = await pool.query(
+    "SELECT id FROM milk_entries WHERE member_id = ? AND entry_date = ? AND shift = ? LIMIT 1",
+    [v.member_id, v.entry_date, v.shift]);
+  if (exists.length) return res.status(409).json({ error: "An entry for this producer, date and shift already exists" });
   const amount = round2(v.milk_ltr * v.rate_per_ltr);
   try {
     const [r] = await pool.query(
-      `INSERT INTO milk_entries (member_id, entry_date, shift, milk_ltr, fat, snf, rate_per_ltr, amount)
-       VALUES (:member_id, :entry_date, :shift, :milk_ltr, :fat, :snf, :rate_per_ltr, :amount)`,
-      { ...v, amount });
+      `INSERT INTO milk_entries (member_id, entry_date, shift, milk_ltr, fat, snf, rate_per_ltr)
+       VALUES (:member_id, :entry_date, :shift, :milk_ltr, :fat, :snf, :rate_per_ltr)`,
+      v);
     res.status(201).json({ id: r.insertId, ...v, amount });
   } catch (e) {
     if (e.errno === 1062) return res.status(409).json({ error: "An entry for this producer, date and shift already exists" });
@@ -311,12 +339,16 @@ app.put("/api/collection/:id", h(async (req, res) => {
   const v = entryRules(req.body);
   if (v.error) return res.status(400).json(v);
   const amount = round2(v.milk_ltr * v.rate_per_ltr);
+  const [clash] = await pool.query(
+    "SELECT id FROM milk_entries WHERE member_id = ? AND entry_date = ? AND shift = ? AND id <> ? LIMIT 1",
+    [v.member_id, v.entry_date, v.shift, id]);
+  if (clash.length) return res.status(409).json({ error: "Another entry already exists for this producer, date and shift" });
   try {
     await pool.query(
       `UPDATE milk_entries SET member_id = :member_id, entry_date = :entry_date, shift = :shift,
-        milk_ltr = :milk_ltr, fat = :fat, snf = :snf, rate_per_ltr = :rate_per_ltr, amount = :amount
+        milk_ltr = :milk_ltr, fat = :fat, snf = :snf, rate_per_ltr = :rate_per_ltr
        WHERE id = :id`,
-      { ...v, amount, id });
+      { ...v, id });
     res.json({ id, ...v, amount });
   } catch (e) {
     if (e.errno === 1062) return res.status(409).json({ error: "Another entry already exists for this producer, date and shift" });
@@ -342,30 +374,45 @@ const touchStatus = async (collectionId, status, extra = {}) => {
   );
   if (entry.length === 0) return null;
   const { member_id, phone } = entry[0];
-  await pool.query(
-    `INSERT INTO whatsapp_messages
-       (producer_id, collection_id, phone, message, status, opened_at, sent_at, failed_at, error_message)
-     VALUES (:producer_id, :collection_id, :phone, :message, :status,
-             :opened_at, :sent_at, :failed_at, :error_message)
-     ON DUPLICATE KEY UPDATE
-       status = VALUES(status),
-       opened_at     = IFNULL(VALUES(opened_at), opened_at),
-       sent_at       = VALUES(sent_at),
-       failed_at     = VALUES(failed_at),
-       error_message = VALUES(error_message),
-       message       = IF(VALUES(message) = '', message, VALUES(message))`,
-    {
-      producer_id: member_id,
-      collection_id: collectionId,
-      phone: String(extra.phone ?? phone).replace(/\D/g, "").slice(0, 20),
-      message: String(extra.message ?? "").slice(0, 4000),
-      status,
-      opened_at: status === "opened" ? new Date() : null,
-      sent_at: status === "sent" ? new Date() : null,
-      failed_at: status === "failed" ? new Date() : null,
-      error_message: status === "failed" ? String(extra.error ?? "").slice(0, 255) : null,
-    },
-  );
+  const cleanPhone = String(extra.phone ?? phone).replace(/\D/g, "").slice(0, 20);
+  const message = String(extra.message ?? "").slice(0, 4000);
+  const error_message = status === "failed" ? String(extra.error ?? "").slice(0, 255) : null;
+  const now = new Date();
+
+  // Explicit upsert — safe even when collection_id has no UNIQUE key
+  const [existing] = await pool.query(
+    "SELECT id, message FROM whatsapp_messages WHERE collection_id = ? ORDER BY id LIMIT 1",
+    [collectionId]);
+
+  if (existing.length) {
+    await pool.query(
+      `UPDATE whatsapp_messages SET
+         status = ?,
+         opened_at     = IFNULL(?, opened_at),
+         sent_at       = ?,
+         failed_at     = ?,
+         error_message = ?,
+         message       = IF(? = '', message, ?),
+         updated_at    = NOW()
+       WHERE id = ?`,
+      [status,
+       status === "opened" ? now : null,
+       status === "sent" ? now : null,
+       status === "failed" ? now : null,
+       error_message,
+       message, message,
+       existing[0].id]);
+  } else {
+    await pool.query(
+      `INSERT INTO whatsapp_messages
+         (producer_id, collection_id, phone, message, status, opened_at, sent_at, failed_at, error_message, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [member_id, collectionId, cleanPhone, message, status,
+       status === "opened" ? now : null,
+       status === "sent" ? now : null,
+       status === "failed" ? now : null,
+       error_message]);
+  }
   return { collection_id: collectionId, status };
 };
 
@@ -406,7 +453,7 @@ app.post("/api/whatsapp/messages/bulk-status", h(async (req, res) => {
     for (const id of ids.slice(0, 500)) {
       if (!valid(Number(id))) continue;
       const [r] = await conn.query(
-        `UPDATE whatsapp_messages SET status = ?, ${col ? col + " = NOW()," : ""} error_message = NULL
+        `UPDATE whatsapp_messages SET status = ?, ${col ? col + " = NOW()," : ""} error_message = NULL, updated_at = NOW()
          WHERE collection_id = ?`,
         [status, Number(id)],
       );
@@ -509,6 +556,7 @@ const PORT = Number(process.env.PORT || 3001);
 ensureSchema()
   .then(() => console.log("[schema] tables verified / created"))
   .catch((e) => console.warn(`[schema] auto-heal skipped: ${e.message}`))
+  .finally(() => detectColumns())
   .finally(() => {
     app.listen(PORT, () => {
       console.log(`\n🥛 MilkPro API listening on http://localhost:${PORT}`);
