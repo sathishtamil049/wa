@@ -39,6 +39,13 @@ export interface HistoryApiRow {
   updatedAt: string;
 }
 
+let lastError = "";
+
+/** Human-readable detail from the most recent failed request (if any). */
+export function getLastError(): string {
+  return lastError;
+}
+
 async function req<T>(path: string, init?: RequestInit, timeoutMs = 3500): Promise<T | null> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
@@ -48,9 +55,15 @@ async function req<T>(path: string, init?: RequestInit, timeoutMs = 3500): Promi
       signal: ctrl.signal,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string; sql?: string; detail?: string } | null;
+      lastError = body?.sql ? `${body.error ?? "Error"}: ${body.sql}` : body?.error ?? `HTTP ${res.status}`;
+      return null;
+    }
+    lastError = "";
     return (await res.json()) as T;
   } catch {
+    lastError = "Network error — API not reachable";
     return null;
   } finally {
     window.clearTimeout(timer);

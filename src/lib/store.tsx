@@ -180,7 +180,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         });
         return true;
       }
-      if (announceError) toast("error", "Could not load collection from the API — check /api/diagnose on the backend");
+      if (announceError) {
+        const detail = api.getLastError();
+        toast("error", detail ? `API error — ${detail.slice(0, 110)}` : "Could not load collection from the API");
+      }
       return false;
     },
     [toast],
