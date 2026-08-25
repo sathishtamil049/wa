@@ -4,6 +4,10 @@ Self-contained API for the MilkPro WhatsApp Sender. Reads the existing
 `members` / `milk_entries` / `advances` tables (never modifies them) and
 tracks WhatsApp statuses in its own `whatsapp_messages` table.
 
+> 📦 **Hosting on cPanel?** Follow **[DEPLOYMENT.md](DEPLOYMENT.md)** —
+> it covers the MySQL database, the Node.js app (Passenger), env vars,
+> and uploading the built frontend step by step.
+
 ## 1 · Prepare XAMPP
 
 1. Open the **XAMPP Control Panel** → click **Start** next to **MySQL**.
