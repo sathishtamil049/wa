@@ -11,6 +11,7 @@ import { ToastHost } from "./ui";
 const NAV: Array<{ route: Route; label: string; icon: IconName }> = [
   { route: "dashboard", label: "Dashboard", icon: "dashboard" },
   { route: "collection", label: "Milk Collection", icon: "droplet" },
+  { route: "producers", label: "Producers", icon: "users" },
   { route: "sender", label: "WhatsApp Sender", icon: "whatsapp" },
   { route: "history", label: "Message History", icon: "history" },
   { route: "templates", label: "Templates", icon: "message" },
@@ -21,6 +22,7 @@ const NAV: Array<{ route: Route; label: string; icon: IconName }> = [
 const TITLES: Record<Route, { title: string; sub: string }> = {
   dashboard: { title: "Dashboard", sub: "Daily collection overview & delivery pulse" },
   collection: { title: "Daily Milk Collection", sub: "Entries read from the Milk Producers database" },
+  producers: { title: "Producer Management", sub: "Members of the dairy — add, edit or archive" },
   sender: { title: "WhatsApp Sender", sub: "Personalised messages — you stay in control of sending" },
   history: { title: "Message History", sub: "Every message tracked with its delivery status" },
   templates: { title: "Message Templates", sub: "Personalise with live variable preview" },

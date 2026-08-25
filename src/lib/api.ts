@@ -227,3 +227,78 @@ export async function putTemplate(template: string): Promise<boolean> {
   });
   return j?.saved === true;
 }
+
+// ── CRUD: like `req` but also parses error bodies on 4xx ──────────────────
+interface CrudResult {
+  ok: boolean;
+  status: number;
+  data: Record<string, unknown>;
+}
+
+async function crud(path: string, init?: RequestInit): Promise<CrudResult | null> {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    });
+    let data: Record<string, unknown> = {};
+    try {
+      data = (await res.json()) as Record<string, unknown>;
+    } catch {
+      /* non-JSON body */
+    }
+    return { ok: res.ok, status: res.status, data };
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export interface MemberApi {
+  id: number;
+  code: string;
+  name: string;
+  phone: string;
+  status: "active" | "inactive";
+  entries: number;
+}
+
+export interface MemberInput {
+  code: string;
+  name: string;
+  phone: string;
+  status: "active" | "inactive";
+}
+
+export interface EntryInput {
+  member_id: number;
+  entry_date: string;
+  shift: "AM" | "PM";
+  milk_ltr: number;
+  fat: number;
+  snf: number;
+  rate_per_ltr: number;
+  advance: number;
+}
+
+export async function fetchMembers(q = "", status: "ALL" | "active" | "inactive" = "ALL"): Promise<MemberApi[] | null> {
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (status !== "ALL") p.set("status", status);
+  const j = await req<{ rows?: MemberApi[] }>(`/api/members?${p.toString()}`);
+  return j?.rows ?? null;
+}
+
+export const createMember = (body: MemberInput) => crud("/api/members", { method: "POST", body: JSON.stringify(body) });
+export const updateMember = (id: number, body: MemberInput) =>
+  crud(`/api/members/${id}`, { method: "PUT", body: JSON.stringify(body) });
+export const deleteMember = (id: number) => crud(`/api/members/${id}`, { method: "DELETE" });
+
+export const createMilkEntry = (body: EntryInput) => crud("/api/milk-entries", { method: "POST", body: JSON.stringify(body) });
+export const updateMilkEntry = (id: number, body: EntryInput) =>
+  crud(`/api/milk-entries/${id}`, { method: "PUT", body: JSON.stringify(body) });
+export const deleteMilkEntry = (id: number) => crud(`/api/milk-entries/${id}`, { method: "DELETE" });

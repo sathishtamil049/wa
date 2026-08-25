@@ -1,11 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { DEFAULT_TEMPLATE, getCollections, producerById, toISO } from "./data";
+import { DEFAULT_TEMPLATE, getCollections, PRODUCERS, producerById, toISO } from "./data";
 import type { Collection, MsgStatus, Producer } from "./data";
 import { renderTemplate } from "./utils";
 import * as api from "./api";
 
-export type Route = "dashboard" | "collection" | "sender" | "history" | "templates" | "export" | "settings";
+export type Route = "dashboard" | "collection" | "producers" | "sender" | "history" | "templates" | "export" | "settings";
 export type DbMode = "checking" | "live" | "demo";
 
 export interface MsgRecord {
@@ -44,6 +44,28 @@ export interface EnrichedRow extends Collection {
   msg?: MsgRecord;
 }
 
+export interface ProducerInput {
+  id?: number;
+  code: string;
+  name: string;
+  phone: string;
+  status: "active" | "inactive";
+}
+
+export interface EntryFormInput {
+  id?: string; // collection id when editing
+  producerId: number;
+  date: string;
+  shift: "AM" | "PM";
+  milkLtr: number;
+  fat: number;
+  snf: number;
+  rate: number;
+  advance: number;
+}
+
+export type CrudResult = { ok: true } | { ok: false; error: string };
+
 const DEFAULT_PREFS: Prefs = {
   centerName: "Milk Producers Management System",
   adminName: "Admin",
@@ -66,6 +88,18 @@ function load<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+const toProducer = (m: { id: number; code: string; name: string; phone: string }): Producer => ({
+  id: m.id,
+  code: m.code,
+  name: m.name,
+  phone: m.phone,
+  village: "—",
+  animal: "Mixed",
+  joined: "",
+});
 
 interface AppState {
   route: Route;
@@ -93,6 +127,14 @@ interface AppState {
   mode: DbMode;
   refreshing: boolean;
   reconnect: () => void;
+  refresh: () => Promise<void>;
+  // ── directory & CRUD ──
+  producers: Producer[];
+  memberEntries: Record<number, number>; // producer id → total entry count (live mode)
+  saveProducer: (input: ProducerInput) => Promise<CrudResult>;
+  deleteProducer: (id: number) => Promise<CrudResult>;
+  saveEntry: (input: EntryFormInput) => Promise<CrudResult>;
+  deleteEntry: (id: string) => Promise<CrudResult>;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -106,7 +148,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [mode, setMode] = useState<DbMode>("checking");
   const [liveRows, setLiveRows] = useState<EnrichedRow[] | null>(null);
+  const [apiMembers, setApiMembers] = useState<api.MemberApi[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+
+  // demo-mode CRUD overlays (session only)
+  const [demoMembers, setDemoMembers] = useState<Producer[] | null>(null);
+  const [entryPatches, setEntryPatches] = useState<Record<string, Partial<EnrichedRow>>>({});
+  const [entryDeleted, setEntryDeleted] = useState<string[]>([]);
+  const [entryAdded, setEntryAdded] = useState<EnrichedRow[]>([]);
+
   const toastId = useRef(0);
   const announced = useRef(false);
   const modeRef = useRef<DbMode>("checking");
@@ -132,7 +182,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
 
-  // ── live collection loader ───────────────────────────────────────────────
+  // ── live loaders ─────────────────────────────────────────────────────────
   const loadLive = useCallback(
     async (d: string, announceError = true) => {
       setRefreshing(true);
@@ -153,6 +203,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [toast],
   );
 
+  const loadMembers = useCallback(async () => {
+    const m = await api.fetchMembers();
+    if (m) setApiMembers(m);
+    return m !== null;
+  }, []);
+
+  const refresh = useCallback(async () => {
+    if (modeRef.current === "live") {
+      await Promise.all([loadLive(date, false), loadMembers()]);
+    }
+  }, [date, loadLive, loadMembers]);
+
   // ── backend detection ────────────────────────────────────────────────────
   const detect = useCallback(async () => {
     setMode("checking");
@@ -162,6 +224,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const t = await api.fetchTemplate();
       if (t) setTemplate(t);
       void loadLive(date, false);
+      void loadMembers();
       if (!announced.current) {
         announced.current = true;
         window.setTimeout(() => toast("success", `Connected to MySQL via MilkPro API (${api.API_BASE})`), 500);
@@ -169,12 +232,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } else {
       setMode("demo");
       setLiveRows(null);
+      setApiMembers(null);
       if (!announced.current) {
         announced.current = true;
         window.setTimeout(() => toast("info", "API offline — running on demo data. Start the backend with `npm run dev`"), 500);
       }
     }
-  }, [date, loadLive, toast]);
+  }, [date, loadLive, loadMembers, toast]);
 
   useEffect(() => {
     void detect();
@@ -182,20 +246,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (mode === "live") void loadLive(date);
-  }, [mode, date, loadLive]);
-
-  // ── rows: live API rows (with optimistic local overlays) or demo data ────
-  const rows: EnrichedRow[] = useMemo(() => {
-    if (mode === "live" && liveRows) {
-      return liveRows.map((r) => (messages[r.id] ? { ...r, msg: messages[r.id] } : r));
+    if (mode === "live") {
+      void loadLive(date);
+      void loadMembers();
     }
-    return getCollections(date).map((c) => ({
-      ...c,
-      producer: producerById.get(c.producerId)!,
-      msg: messages[c.id],
-    }));
-  }, [mode, liveRows, date, messages]);
+  }, [mode, date, loadLive, loadMembers]);
+
+  // ── producers directory ──────────────────────────────────────────────────
+  const producers: Producer[] = useMemo(() => {
+    if (mode === "live" && apiMembers) return apiMembers.map(toProducer);
+    return demoMembers ?? PRODUCERS;
+  }, [mode, apiMembers, demoMembers]);
+
+  const memberEntries: Record<number, number> = useMemo(() => {
+    const out: Record<number, number> = {};
+    if (mode === "live" && apiMembers) {
+      for (const m of apiMembers) out[m.id] = m.entries;
+    } else {
+      for (const r of getCollections(date)) out[r.producerId] = (out[r.producerId] ?? 0) + 1;
+    }
+    return out;
+  }, [mode, apiMembers, date]);
+
+  // ── rows: live (+ optimistic overlays) or demo (+ session overlays) ──────
+  const rows: EnrichedRow[] = useMemo(() => {
+    const base: EnrichedRow[] =
+      mode === "live" && liveRows
+        ? liveRows.map((r) => (messages[r.id] ? { ...r, msg: messages[r.id] } : r))
+        : getCollections(date).map((c) => ({
+            ...c,
+            producer: producerById.get(c.producerId)!,
+            msg: messages[c.id],
+          }));
+    let out = base.filter((r) => !entryDeleted.includes(r.id)).map((r) => (entryPatches[r.id] ? { ...r, ...entryPatches[r.id] } : r));
+    out = [...out, ...entryAdded.filter((r) => r.date === date)];
+    return out;
+  }, [mode, liveRows, date, messages, entryDeleted, entryPatches, entryAdded]);
 
   const messageFor = useCallback(
     (row: EnrichedRow) => row.msg?.message || renderTemplate(template, row),
@@ -218,20 +304,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (row: EnrichedRow): MsgRecord => {
       const now = new Date().toISOString();
       const existing = messages[row.id];
+      const body = existing?.message || renderTemplate(template, row);
       const record: MsgRecord =
         existing ?? {
           id: `wa_${row.id.replace(/\|/g, "_")}`,
           collectionId: row.id,
           producerId: row.producerId,
           phone: row.producer.phone,
-          message: "",
+          message: body,
           status: "pending",
           createdAt: now,
           updatedAt: now,
         };
-      // API rows carry no snapshot client-side — always render the template fresh.
-      const body = record.message || renderTemplate(template, row);
-      const next = { ...record, message: body, status: "opened" as MsgStatus, openedAt: now, updatedAt: now };
+      const next = { ...record, status: "opened" as MsgStatus, openedAt: now, updatedAt: now };
       setMessages((prev) => ({ ...prev, [row.id]: next }));
       if (modeRef.current === "live") void api.postOpened(row.id, row.producer.phone, body);
       return next;
@@ -289,6 +374,124 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const savePrefs = useCallback((p: Prefs) => setPrefs(p), []);
   const reconnect = useCallback(() => void detect(), [detect]);
 
+  // ── CRUD: producers ───────────────────────────────────────────────────────
+  const saveProducer = useCallback(
+    async (input: ProducerInput): Promise<CrudResult> => {
+      const body: api.MemberInput = { code: input.code, name: input.name, phone: input.phone, status: input.status };
+      if (modeRef.current === "live") {
+        const res = input.id ? await api.updateMember(input.id, body) : await api.createMember(body);
+        if (!res) return { ok: false, error: "API unreachable — nothing was saved" };
+        if (!res.ok) return { ok: false, error: String(res.data.error ?? "Save failed") };
+        await loadMembers();
+        return { ok: true };
+      }
+      // demo: session-only
+      const list = demoMembers ?? PRODUCERS;
+      if (list.some((p) => p.code.toLowerCase() === input.code.toLowerCase() && p.id !== input.id)) {
+        return { ok: false, error: `Producer ID "${input.code}" already exists` };
+      }
+      const nextId = input.id ?? Math.max(0, ...list.map((p) => p.id)) + 1;
+      const nextList: Producer[] = [
+        ...list.filter((p) => p.id !== nextId),
+        { id: nextId, code: input.code, name: input.name, phone: input.phone, village: "—", animal: "Mixed" as const, joined: "" },
+      ].sort((a, b) => a.name.localeCompare(b.name));
+      setDemoMembers(nextList);
+      return { ok: true };
+    },
+    [demoMembers, loadMembers],
+  );
+
+  const deleteProducer = useCallback(
+    async (id: number): Promise<CrudResult> => {
+      if (modeRef.current === "live") {
+        const res = await api.deleteMember(id);
+        if (!res) return { ok: false, error: "API unreachable — nothing was deleted" };
+        if (!res.ok) return { ok: false, error: String(res.data.error ?? "Delete failed") };
+        await loadMembers();
+        return { ok: true };
+      }
+      const hasEntries = (demoMembers ?? PRODUCERS).some(() => false) ||
+        Object.entries(memberEntries).some(([pid, n]) => Number(pid) === id && n > 0);
+      if (hasEntries) return { ok: false, error: "Producer has collection entries — delete those first" };
+      setDemoMembers((demoMembers ?? PRODUCERS).filter((p) => p.id !== id));
+      return { ok: true };
+    },
+    [demoMembers, loadMembers, memberEntries],
+  );
+
+  // ── CRUD: milk entries ────────────────────────────────────────────────────
+  const saveEntry = useCallback(
+    async (input: EntryFormInput): Promise<CrudResult> => {
+      const body: api.EntryInput = {
+        member_id: input.producerId,
+        entry_date: input.date,
+        shift: input.shift,
+        milk_ltr: input.milkLtr,
+        fat: input.fat,
+        snf: input.snf,
+        rate_per_ltr: input.rate,
+        advance: input.advance,
+      };
+      if (modeRef.current === "live") {
+        const numericId = input.id && !input.id.startsWith("demo") ? Number(input.id) : null;
+        const res = numericId ? await api.updateMilkEntry(numericId, body) : await api.createMilkEntry(body);
+        if (!res) return { ok: false, error: "API unreachable — nothing was saved" };
+        if (!res.ok) return { ok: false, error: String(res.data.error ?? "Save failed") };
+        await Promise.all([loadLive(input.date, false), loadMembers()]);
+        return { ok: true };
+      }
+      // demo: session-only
+      const producer = (demoMembers ?? PRODUCERS).find((p) => p.id === input.producerId);
+      if (!producer) return { ok: false, error: "Producer not found" };
+      const amount = round2(input.milkLtr * input.rate);
+      const row: EnrichedRow = {
+        id: input.id?.startsWith("demo") || !input.id ? `demo_${Date.now()}` : input.id,
+        producerId: producer.id,
+        producer,
+        date: input.date,
+        shift: input.shift,
+        milkLtr: input.milkLtr,
+        fat: input.fat,
+        snf: input.snf,
+        rate: input.rate,
+        amount,
+        advance: input.advance,
+        net: round2(amount - input.advance),
+      };
+      const eid = input.id;
+      if (eid) {
+        if (eid.startsWith("demo")) {
+          setEntryAdded((a) => [...a.filter((r) => r.id !== eid), row]);
+        } else {
+          setEntryPatches((p) => ({ ...p, [eid]: row }));
+        }
+      } else {
+        setEntryAdded((a) => [...a, row]);
+      }
+      return { ok: true };
+    },
+    [demoMembers, loadLive, loadMembers],
+  );
+
+  const deleteEntry = useCallback(
+    async (id: string): Promise<CrudResult> => {
+      if (modeRef.current === "live" && !id.startsWith("demo")) {
+        const res = await api.deleteMilkEntry(Number(id));
+        if (!res) return { ok: false, error: "API unreachable — nothing was deleted" };
+        if (!res.ok) return { ok: false, error: String(res.data.error ?? "Delete failed") };
+        await loadLive(date, false);
+        return { ok: true };
+      }
+      if (id.startsWith("demo")) {
+        setEntryAdded((a) => a.filter((r) => r.id !== id));
+      } else {
+        setEntryDeleted((d) => [...d, id]);
+      }
+      return { ok: true };
+    },
+    [date, loadLive],
+  );
+
   const value: AppState = {
     route,
     go: setRoute,
@@ -315,6 +518,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     mode,
     refreshing,
     reconnect,
+    refresh,
+    producers,
+    memberEntries,
+    saveProducer,
+    deleteProducer,
+    saveEntry,
+    deleteEntry,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

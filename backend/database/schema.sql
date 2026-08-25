@@ -1,22 +1,25 @@
 -- ════════════════════════════════════════════════════════════════════════
---  MilkPro WhatsApp Sender — MySQL / MariaDB (XAMPP) schema + sample data
---  Import via phpMyAdmin → your server → "Import" tab → choose this file
---  (or the "SQL" tab → paste → Go). Safe to re-run.
+--  MilkPro WhatsApp Sender — MySQL / MariaDB schema + sample data
+--
+--  ⚠ IMPORTANT (XAMPP and cPanel):
+--  1. Create the database FIRST:
+--     • XAMPP:  phpMyAdmin → "Databases" tab → name it `milkpro` → Create
+--     • cPanel: MySQL® Databases wizard (e.g. yourname_milkpro)
+--  2. In phpMyAdmin, CLICK THE DATABASE NAME in the left panel
+--     (so it is selected / highlighted).
+--  3. Import tab → choose this file → Go.
+--  (This file has no CREATE DATABASE / USE lines on purpose — they fail on
+--   cPanel and abort the whole import.)
+--  Safe to re-run.
 -- ════════════════════════════════════════════════════════════════════════
 
-CREATE DATABASE IF NOT EXISTS milkpro
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-USE milkpro;
-
--- ── Existing Milk Producers Management System tables (adapt names to yours) ──
+-- ── Milk Producers Management System tables (adapt names to yours) ──────
 
 CREATE TABLE IF NOT EXISTS members (
   id           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   member_code  VARCHAR(20)  NOT NULL UNIQUE,
   name         VARCHAR(100) NOT NULL,
-  phone        VARCHAR(15)  NOT NULL,          -- 10-digit local number
+  phone        VARCHAR(15)  NOT NULL,          -- digits only, no country code
   status       ENUM('active','inactive') NOT NULL DEFAULT 'active',
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
@@ -33,6 +36,7 @@ CREATE TABLE IF NOT EXISTS milk_entries (
   amount       DECIMAL(10,2) NOT NULL DEFAULT 0,   -- milk_ltr * rate_per_ltr
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   KEY idx_date_shift (entry_date, shift),
+  KEY idx_member (member_id),
   CONSTRAINT fk_entries_member FOREIGN KEY (member_id) REFERENCES members(id)
 ) ENGINE=InnoDB;
 
@@ -42,7 +46,7 @@ CREATE TABLE IF NOT EXISTS advances (
   amount       DECIMAL(10,2) NOT NULL DEFAULT 0,
   advance_date DATE NOT NULL,
   created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  KEY idx_member_date (member_id, advance_date),
+  UNIQUE KEY uq_member_date (member_id, advance_date),
   CONSTRAINT fk_advances_member FOREIGN KEY (member_id) REFERENCES members(id)
 ) ENGINE=InnoDB;
 
@@ -79,7 +83,7 @@ INSERT INTO settings (k, v) VALUES ('message_template',
 'Hello {producer_name},\n\nToday''s Milk Collection\n\nDate: {date}\nShift: {shift}\nMilk: {milk_ltr} Ltr\nFAT: {fat}\nSNF: {snf}\nRate: ₹{rate_per_ltr}/Ltr\n\nMilk Amount: ₹{milk_amount}\nAdvance Deduction: ₹{advance_deduction}\nNet Payable: ₹{net_payable}\n\nThank you.\nMilk Producers Management System')
 ON DUPLICATE KEY UPDATE k = k;  -- keep user's edits on re-import
 
--- ── Sample data (phones are fictitious — replace with real producer numbers) ─
+-- ── Sample data (phones are fictitious — replace with real numbers) ─────
 
 INSERT IGNORE INTO members (id, member_code, name, phone) VALUES
   (1, 'MP-001', 'Ravi Kumar',      '9812045671'),
