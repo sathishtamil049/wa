@@ -80,9 +80,23 @@ plus the (password-masked) DB config.
 
 ### Endpoints
 
+**v2 note:** `server.js` now auto-creates any missing tables/columns at boot
+(`whatsapp_messages`, `settings`, plus `village`/`animal`/`status` on members
+and the one-entry-per-shift unique key). If the frontend ever shows
+"Could not load collection from the API", just restart the Node app once —
+or check `GET /api/diagnose` to see exactly which table is missing.
+
 ```
 GET  /api/health
+GET  /api/diagnose
 GET  /api/dashboard?date=YYYY-MM-DD
+GET  /api/producers?all=1
+POST /api/producers                    { code, name, phone, village?, animal? }
+PUT  /api/producers/:id
+DELETE /api/producers/:id(?hard=1)     soft-archive by default; hard only if no history
+POST /api/collection                   { member_id, entry_date, shift, milk_ltr, fat, snf, rate_per_ltr }
+PUT  /api/collection/:id
+DELETE /api/collection/:id             also removes its WhatsApp tracking row
 GET  /api/collection?date=&shift=AM|PM&status=&q=
 POST /api/whatsapp/message/:collectionId/opened   { phone, message }
 POST /api/whatsapp/message/:collectionId/sent

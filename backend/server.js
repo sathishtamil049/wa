@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════
-//  MilkPro WhatsApp Sender — Express API (read-only against milk data)
+//  MilkPro WhatsApp Sender — Express API (MySQL / MariaDB, XAMPP + cPanel)
 //  Run:  npm install → npm run db:test → npm run dev
-//  Never modifies members / milk_entries / advances.
+//  v2: auto-heals missing tables/columns at boot, producer & entry CRUD.
 // ════════════════════════════════════════════════════════════════════════
 import express from "express";
 import cors from "cors";
@@ -9,12 +9,11 @@ import "dotenv/config";
 import { pool, ping, safeConfig } from "./config/database.js";
 
 const app = express();
-// Dev-friendly CORS: if CORS_ORIGIN is empty/unset, mirror any origin (incl. file://).
-const allow = String(process.env.CORS_ORIGIN || "").split(",").map((s) => s.trim()).filter(Boolean);
-app.use(cors(allow.length ? { origin: allow } : { origin: true, methods: ["GET", "POST", "PUT", "OPTIONS"] }));
+// CORS_ORIGIN empty/absent → mirror the requesting origin (dev + cPanel friendly)
+const origins = (process.env.CORS_ORIGIN ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+app.use(cors({ origin: origins.length ? origins : true }));
 app.use(express.json({ limit: "64kb" }));
 
-/** Wrap async handlers so rejections hit the error middleware. */
 const h = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
 const today = () => {
@@ -22,28 +21,132 @@ const today = () => {
   return `${d.getFullYear()}-${`${d.getMonth() + 1}`.padStart(2, "0")}-${`${d.getDate()}`.padStart(2, "0")}`;
 };
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s ?? "");
+const round2 = (n) => Math.round(n * 100) / 100;
 
-// ── Health ──────────────────────────────────────────────────────────────
+// ── Schema auto-heal (safe to re-run; never touches existing rows) ────────
+async function ensureSchema() {
+  const run = async (sql) => { try { await pool.query(sql); return true; } catch (e) { return e; } };
+
+  await run(`CREATE TABLE IF NOT EXISTS members (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    member_code VARCHAR(20) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    phone VARCHAR(15) NOT NULL,
+    village VARCHAR(60) NULL,
+    animal ENUM('Buffalo','Cow','Mixed') NOT NULL DEFAULT 'Mixed',
+    status ENUM('active','inactive') NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await run(`CREATE TABLE IF NOT EXISTS milk_entries (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    member_id INT UNSIGNED NOT NULL,
+    entry_date DATE NOT NULL,
+    shift ENUM('AM','PM') NOT NULL,
+    milk_ltr DECIMAL(8,2) NOT NULL DEFAULT 0,
+    fat DECIMAL(4,1) NOT NULL DEFAULT 0,
+    snf DECIMAL(4,1) NOT NULL DEFAULT 0,
+    rate_per_ltr DECIMAL(8,2) NOT NULL DEFAULT 0,
+    amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_date_shift (entry_date, shift)
+  ) ENGINE=InnoDB`);
+
+  await run(`CREATE TABLE IF NOT EXISTS advances (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    member_id INT UNSIGNED NOT NULL,
+    amount DECIMAL(10,2) NOT NULL DEFAULT 0,
+    advance_date DATE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_member_date (member_id, advance_date)
+  ) ENGINE=InnoDB`);
+
+  await run(`CREATE TABLE IF NOT EXISTS whatsapp_messages (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    producer_id INT UNSIGNED NOT NULL,
+    collection_id INT UNSIGNED NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    message TEXT NOT NULL,
+    status ENUM('pending','opened','sent','failed','skipped') NOT NULL DEFAULT 'pending',
+    opened_at DATETIME NULL,
+    sent_at DATETIME NULL,
+    failed_at DATETIME NULL,
+    error_message VARCHAR(255) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_collection (collection_id),
+    KEY idx_producer (producer_id),
+    KEY idx_status (status)
+  ) ENGINE=InnoDB`);
+
+  await run(`CREATE TABLE IF NOT EXISTS settings (
+    k VARCHAR(64) PRIMARY KEY,
+    v TEXT NOT NULL
+  ) ENGINE=InnoDB`);
+
+  // Upgrade older databases: add newer columns (1060 = column already exists)
+  for (const sql of [
+    "ALTER TABLE members ADD COLUMN village VARCHAR(60) NULL",
+    "ALTER TABLE members ADD COLUMN animal ENUM('Buffalo','Cow','Mixed') NOT NULL DEFAULT 'Mixed'",
+    "ALTER TABLE members ADD COLUMN status ENUM('active','inactive') NOT NULL DEFAULT 'active'",
+  ]) {
+    const r = await run(sql);
+    if (r !== true && r?.errno !== 1060) console.warn(`[schema] ${r.message}`);
+  }
+
+  // One entry per member/date/shift (1061 = key exists, 1062 = rows conflict)
+  const uk = await run("ALTER TABLE milk_entries ADD UNIQUE KEY uq_member_date_shift (member_id, entry_date, shift)");
+  if (uk !== true && uk?.errno !== 1061 && uk?.errno !== 1062) console.warn(`[schema] ${uk.message}`);
+
+  await run(`INSERT INTO settings (k, v) VALUES ('message_template',
+    'Hello {producer_name},\\n\\nToday''s Milk Collection\\n\\nDate: {date}\\nShift: {shift}\\nMilk: {milk_ltr} Ltr\\nFAT: {fat}\\nSNF: {snf}\\nRate: ₹{rate_per_ltr}/Ltr\\n\\nMilk Amount: ₹{milk_amount}\\nAdvance Deduction: ₹{advance_deduction}\\nNet Payable: ₹{net_payable}\\n\\nThank you.\\nMilk Producers Management System')
+    ON DUPLICATE KEY UPDATE k = k`);
+}
+
+// ── Health & diagnostics ──────────────────────────────────────────────────
 app.get("/api/health", h(async (_req, res) => {
   await ping();
   res.json({ status: "ok", db: safeConfig(), time: new Date().toISOString() });
 }));
 
-// ── Dashboard stats ─────────────────────────────────────────────────────
+app.get("/api/diagnose", h(async (_req, res) => {
+  const tables = ["members", "milk_entries", "advances", "whatsapp_messages", "settings"];
+  const report = {};
+  for (const t of tables) {
+    try {
+      const [r] = await pool.query(`SELECT COUNT(*) AS n FROM ${t}`);
+      report[t] = { ok: true, rows: Number(r[0].n) };
+    } catch (e) {
+      report[t] = { ok: false, error: e.code ?? e.message };
+    }
+  }
+  const missing = tables.filter((t) => !report[t].ok);
+  res.json({
+    status: missing.length ? "degraded" : "ok",
+    missing_tables: missing,
+    tables: report,
+    db: safeConfig(),
+    hint: missing.length
+      ? "Restart the app once (schema auto-heals at boot) or import database/schema.sql in phpMyAdmin."
+      : "All tables present.",
+  });
+}));
+
+// ── Dashboard stats ───────────────────────────────────────────────────────
 app.get("/api/dashboard", h(async (req, res) => {
   const date = isDate(req.query.date) ? req.query.date : today();
   const [rows] = await pool.query(
-    `SELECT COUNT(DISTINCT me.member_id)                                   AS producers,
-            COUNT(*)                                                       AS entries,
-            COALESCE(SUM(me.milk_ltr), 0)                                  AS litres,
-            COALESCE(SUM(me.amount), 0)                                    AS amount,
-            COALESCE(SUM(COALESCE(a.amount, 0)), 0)                        AS advance,
-            COALESCE(SUM(me.amount - COALESCE(a.amount, 0)), 0)            AS net,
-            SUM(wm.status IS NULL OR wm.status = 'pending')                AS pending,
-            SUM(wm.status = 'opened')                                      AS opened,
-            SUM(wm.status = 'sent')                                        AS sent,
-            SUM(wm.status = 'failed')                                      AS failed,
-            SUM(wm.status = 'skipped')                                     AS skipped
+    `SELECT COUNT(DISTINCT me.member_id)                        AS producers,
+            COUNT(*)                                            AS entries,
+            COALESCE(SUM(me.milk_ltr), 0)                       AS litres,
+            COALESCE(SUM(me.amount), 0)                         AS amount,
+            COALESCE(SUM(COALESCE(a.amount, 0)), 0)             AS advance,
+            COALESCE(SUM(me.amount - COALESCE(a.amount, 0)), 0) AS net,
+            SUM(wm.status IS NULL OR wm.status = 'pending')     AS pending,
+            SUM(wm.status = 'opened')                           AS opened,
+            SUM(wm.status = 'sent')                             AS sent,
+            SUM(wm.status = 'failed')                           AS failed,
+            SUM(wm.status = 'skipped')                          AS skipped
      FROM milk_entries me
      JOIN members m        ON m.id = me.member_id
      LEFT JOIN advances a  ON a.member_id = me.member_id AND a.advance_date = me.entry_date
@@ -54,7 +157,7 @@ app.get("/api/dashboard", h(async (req, res) => {
   res.json({ date, ...rows[0] });
 }));
 
-// ── Daily collection (filters: shift, status, q) ────────────────────────
+// ── Daily collection (filters: shift, status, q) ──────────────────────────
 app.get("/api/collection", h(async (req, res) => {
   const date = isDate(req.query.date) ? req.query.date : today();
   const shift = ["AM", "PM"].includes(req.query.shift) ? req.query.shift : "";
@@ -81,6 +184,135 @@ app.get("/api/collection", h(async (req, res) => {
     { date, shift, status, q, like: `%${q}%` },
   );
   res.json({ date, count: rows.length, rows });
+}));
+
+// ── Producer directory + CRUD ─────────────────────────────────────────────
+app.get("/api/producers", h(async (req, res) => {
+  const all = req.query.all === "1";
+  const [rows] = await pool.query(
+    `SELECT m.id, m.member_code AS code, m.name, m.phone, m.village, m.animal, m.status,
+            DATE(m.created_at) AS joined,
+            (SELECT COUNT(*) FROM milk_entries me WHERE me.member_id = m.id AND me.entry_date = CURDATE()) AS entries_today
+     FROM members m ${all ? "" : "WHERE m.status = 'active'"}
+     ORDER BY m.name`,
+  );
+  res.json({ count: rows.length, rows });
+}));
+
+const producerRules = (b) => {
+  const name = String(b?.name ?? "").trim();
+  const code = String(b?.code ?? "").trim();
+  const phone = String(b?.phone ?? "").replace(/\D/g, "");
+  const village = String(b?.village ?? "").trim().slice(0, 60) || null;
+  const animal = ["Buffalo", "Cow", "Mixed"].includes(b?.animal) ? b.animal : "Mixed";
+  if (name.length < 2 || name.length > 60) return { error: "Name must be 2–60 characters" };
+  if (!/^[A-Za-z0-9-]{2,20}$/.test(code)) return { error: "Code must be 2–20 letters/digits (e.g. MP-027)" };
+  if (!/^\d{10,13}$/.test(phone)) return { error: "Phone must be 10–13 digits" };
+  return { name, code, phone, village, animal };
+};
+
+app.post("/api/producers", h(async (req, res) => {
+  const v = producerRules(req.body);
+  if (v.error) return res.status(400).json(v);
+  const [dup] = await pool.query(
+    "SELECT id FROM members WHERE member_code = ? OR phone = ? LIMIT 1", [v.code, v.phone]);
+  if (dup.length) return res.status(409).json({ error: "A producer with this code or phone already exists" });
+  const [r] = await pool.query(
+    "INSERT INTO members (member_code, name, phone, village, animal, status) VALUES (?, ?, ?, ?, ?, 'active')",
+    [v.code, v.name, v.phone, v.village, v.animal]);
+  res.status(201).json({ id: r.insertId, ...v, status: "active" });
+}));
+
+app.put("/api/producers/:id", h(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+  const v = producerRules(req.body);
+  if (v.error) return res.status(400).json(v);
+  const status = req.body?.status === "inactive" ? "inactive" : "active";
+  const [dup] = await pool.query(
+    "SELECT id FROM members WHERE (member_code = ? OR phone = ?) AND id <> ? LIMIT 1", [v.code, v.phone, id]);
+  if (dup.length) return res.status(409).json({ error: "Another producer already uses this code or phone" });
+  await pool.query(
+    "UPDATE members SET member_code = ?, name = ?, phone = ?, village = ?, animal = ?, status = ? WHERE id = ?",
+    [v.code, v.name, v.phone, v.village, v.animal, status, id]);
+  res.json({ id, ...v, status });
+}));
+
+app.delete("/api/producers/:id", h(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+  if (req.query.hard === "1") {
+    const [refs] = await pool.query("SELECT COUNT(*) AS n FROM milk_entries WHERE member_id = ?", [id]);
+    if (Number(refs[0].n) > 0) {
+      return res.status(409).json({ error: "This producer has milk history — deactivating instead of deleting keeps accounts correct. Use ?hard=1 only on fresh records." });
+    }
+    await pool.query("DELETE FROM members WHERE id = ?", [id]);
+    return res.json({ deleted: true, id });
+  }
+  await pool.query("UPDATE members SET status = 'inactive' WHERE id = ?", [id]);
+  res.json({ deactivated: true, id });
+}));
+
+// ── Milk entry CRUD (amount always computed server-side) ──────────────────
+const entryRules = (b) => {
+  const member_id = Number(b?.member_id ?? b?.producer_id);
+  const entry_date = String(b?.entry_date ?? b?.date ?? "");
+  const shift = ["AM", "PM"].includes(b?.shift) ? b.shift : null;
+  const milk_ltr = Number(b?.milk_ltr);
+  const fat = Number(b?.fat);
+  const snf = Number(b?.snf);
+  const rate_per_ltr = Number(b?.rate_per_ltr ?? b?.rate);
+  if (!Number.isInteger(member_id) || member_id <= 0) return { error: "Choose a producer" };
+  if (!isDate(entry_date)) return { error: "Invalid date" };
+  if (!shift) return { error: "Shift must be AM or PM" };
+  if (!(milk_ltr > 0 && milk_ltr <= 5000)) return { error: "Milk litres must be between 0.1 and 5000" };
+  if (!(fat >= 0 && fat <= 15)) return { error: "FAT must be 0–15" };
+  if (!(snf >= 0 && snf <= 15)) return { error: "SNF must be 0–15" };
+  if (!(rate_per_ltr > 0 && rate_per_ltr <= 1000)) return { error: "Rate must be ₹0.01–₹1000 per litre" };
+  return { member_id, entry_date, shift, milk_ltr: round2(milk_ltr), fat: round2(fat), snf: round2(snf), rate_per_ltr: round2(rate_per_ltr) };
+};
+
+app.post("/api/collection", h(async (req, res) => {
+  const v = entryRules(req.body);
+  if (v.error) return res.status(400).json(v);
+  const amount = round2(v.milk_ltr * v.rate_per_ltr);
+  try {
+    const [r] = await pool.query(
+      `INSERT INTO milk_entries (member_id, entry_date, shift, milk_ltr, fat, snf, rate_per_ltr, amount)
+       VALUES (:member_id, :entry_date, :shift, :milk_ltr, :fat, :snf, :rate_per_ltr, :amount)`,
+      { ...v, amount });
+    res.status(201).json({ id: r.insertId, ...v, amount });
+  } catch (e) {
+    if (e.errno === 1062) return res.status(409).json({ error: "An entry for this producer, date and shift already exists" });
+    throw e;
+  }
+}));
+
+app.put("/api/collection/:id", h(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+  const v = entryRules(req.body);
+  if (v.error) return res.status(400).json(v);
+  const amount = round2(v.milk_ltr * v.rate_per_ltr);
+  try {
+    await pool.query(
+      `UPDATE milk_entries SET member_id = :member_id, entry_date = :entry_date, shift = :shift,
+        milk_ltr = :milk_ltr, fat = :fat, snf = :snf, rate_per_ltr = :rate_per_ltr, amount = :amount
+       WHERE id = :id`,
+      { ...v, amount, id });
+    res.json({ id, ...v, amount });
+  } catch (e) {
+    if (e.errno === 1062) return res.status(409).json({ error: "Another entry already exists for this producer, date and shift" });
+    throw e;
+  }
+}));
+
+app.delete("/api/collection/:id", h(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+  await pool.query("DELETE FROM whatsapp_messages WHERE collection_id = ?", [id]);
+  const [r] = await pool.query("DELETE FROM milk_entries WHERE id = ?", [id]);
+  res.json({ deleted: r.affectedRows > 0, id });
 }));
 
 // ── WhatsApp status endpoints (upsert; UNIQUE(collection_id) prevents dupes) ──
@@ -173,7 +405,7 @@ app.post("/api/whatsapp/messages/bulk-status", h(async (req, res) => {
   }
 }));
 
-// ── Message history ─────────────────────────────────────────────────────
+// ── Message history ───────────────────────────────────────────────────────
 app.get("/api/whatsapp/history", h(async (req, res) => {
   const from = isDate(req.query.from) ? req.query.from : "1970-01-01";
   const to = isDate(req.query.to) ? req.query.to : "2999-12-31";
@@ -203,32 +435,6 @@ app.get("/api/whatsapp/history", h(async (req, res) => {
   res.json({ page, limit, total: c[0].n, rows });
 }));
 
-// ── Message template ────────────────────────────────────────────────────
-app.get("/api/whatsapp/template", h(async (_req, res) => {
-  const [rows] = await pool.query("SELECT v FROM settings WHERE k = 'message_template'");
-  res.json({ template: rows[0]?.v ?? "" });
-}));
-app.put("/api/whatsapp/template", h(async (req, res) => {
-  const template = String(req.body?.template ?? "").trim();
-  if (template.length < 10 || template.length > 4000) {
-    return res.status(400).json({ error: "Template must be 10–4000 characters" });
-  }
-  await pool.query(
-    "INSERT INTO settings (k, v) VALUES ('message_template', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)",
-    [template],
-  );
-  res.json({ saved: true });
-}));
-
-// ── Producer directory (read-only) ──────────────────────────────────────
-app.get("/api/producers", h(async (_req, res) => {
-  const [rows] = await pool.query(
-    `SELECT id, member_code AS code, name, phone FROM members WHERE status = 'active' ORDER BY name`,
-  );
-  res.json({ count: rows.length, rows });
-}));
-
-// ── History status counts (for dashboard chips) ─────────────────────────
 app.get("/api/whatsapp/history-counts", h(async (req, res) => {
   const from = isDate(req.query.from) ? req.query.from : "1970-01-01";
   const to = isDate(req.query.to) ? req.query.to : "2999-12-31";
@@ -245,7 +451,24 @@ app.get("/api/whatsapp/history-counts", h(async (req, res) => {
   res.json(out);
 }));
 
-// ── Errors ──────────────────────────────────────────────────────────────
+// ── Message template ──────────────────────────────────────────────────────
+app.get("/api/whatsapp/template", h(async (_req, res) => {
+  const [rows] = await pool.query("SELECT v FROM settings WHERE k = 'message_template'");
+  res.json({ template: rows[0]?.v ?? "" });
+}));
+app.put("/api/whatsapp/template", h(async (req, res) => {
+  const template = String(req.body?.template ?? "").trim();
+  if (template.length < 10 || template.length > 4000) {
+    return res.status(400).json({ error: "Template must be 10–4000 characters" });
+  }
+  await pool.query(
+    "INSERT INTO settings (k, v) VALUES ('message_template', ?) ON DUPLICATE KEY UPDATE v = VALUES(v)",
+    [template],
+  );
+  res.json({ saved: true });
+}));
+
+// ── Errors ────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: `No route: ${req.method} ${req.path}` }));
 app.use((err, _req, res, _next) => {
   console.error(`[db] ${err.code ?? "ERR"}: ${err.message}`);
@@ -254,15 +477,22 @@ app.use((err, _req, res, _next) => {
     detail: err.code === "ER_ACCESS_DENIED_ERROR"
       ? "Check DB_USER / DB_PASSWORD in .env (XAMPP default: root, empty password)"
       : err.code === "ER_BAD_DB_ERROR"
-        ? "Database not found — import database/schema.sql in phpMyAdmin"
+        ? "Database not found — check DB_NAME (cPanel prefixes it, e.g. user_milkpro)"
         : err.code === "ECONNREFUSED"
-          ? "MySQL is not running — start it from the XAMPP Control Panel"
-          : "Run `npm run db:test` for a full diagnosis",
+          ? "MySQL is not running — start it (XAMPP) or check DB_HOST in cPanel"
+          : err.code === "ER_NO_SUCH_TABLE"
+            ? `${err.message} — restart the app once (it auto-creates missing tables) or check /api/diagnose`
+            : "Run `npm run db:test` for a full diagnosis",
   });
 });
 
 const PORT = Number(process.env.PORT || 3001);
-app.listen(PORT, () => {
-  console.log(`\n🥛 MilkPro API listening on http://localhost:${PORT}`);
-  console.log(`   DB config: ${JSON.stringify(safeConfig())}\n`);
-});
+ensureSchema()
+  .then(() => console.log("[schema] tables verified / created"))
+  .catch((e) => console.warn(`[schema] auto-heal skipped: ${e.message}`))
+  .finally(() => {
+    app.listen(PORT, () => {
+      console.log(`\n🥛 MilkPro API listening on http://localhost:${PORT}`);
+      console.log(`   DB config: ${JSON.stringify(safeConfig())}\n`);
+    });
+  });

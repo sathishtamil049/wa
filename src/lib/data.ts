@@ -81,8 +81,11 @@ function mulberry32(seed: number) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-const r1 = (n: number) => Math.round(n * 10) / 10;
-const r2 = (n: number) => Math.round(n * 100) / 100;
+export const r1 = (n: number) => Math.round(n * 10) / 10;
+export const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/** FAT/SNF based rate suggestion — same formula the dairy uses in demo data. */
+export const suggestRate = (fat: number, snf: number) => r2(fat * 6.4 + snf * 3.2 + 4.5);
 
 // --- daily collection read (members ⋈ milk_entries ⋈ advances) -------------
 const collectionCache = new Map<string, Collection[]>();
