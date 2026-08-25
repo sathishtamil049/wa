@@ -186,6 +186,23 @@ app.get("/api/collection", h(async (req, res) => {
   res.json({ date, count: rows.length, rows });
 }));
 
+// ── Schema inspector: shows the REAL column names of your existing tables ──
+// Use this to adapt the SQL queries when your database predates schema.sql.
+app.get("/api/inspect", h(async (_req, res) => {
+  const [dbRows] = await pool.query("SELECT DATABASE() AS db");
+  const tables = ["members", "milk_entries", "advances", "whatsapp_messages", "settings"];
+  const report = { database: dbRows[0]?.db, tables: {} };
+  for (const t of tables) {
+    try {
+      const [cols] = await pool.query(`SHOW COLUMNS FROM \`${t}\``);
+      report.tables[t] = cols.map((c) => ({ column: c.Field, type: c.Type, null: c.Null === "YES", key: c.Key, default: c.Default }));
+    } catch {
+      report.tables[t] = null; // table missing
+    }
+  }
+  res.json(report);
+}));
+
 // ── Producer directory + CRUD ─────────────────────────────────────────────
 app.get("/api/producers", h(async (req, res) => {
   const all = req.query.all === "1";
@@ -471,18 +488,20 @@ app.put("/api/whatsapp/template", h(async (req, res) => {
 // ── Errors ────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: `No route: ${req.method} ${req.path}` }));
 app.use((err, _req, res, _next) => {
-  console.error(`[db] ${err.code ?? "ERR"}: ${err.message}`);
+  console.error(`[db] ${err.code ?? "ERR"}: ${err.sqlMessage ?? err.message}`);
+  const hint =
+    err.code === "ER_ACCESS_DENIED_ERROR" ? "Check DB_USER / DB_PASSWORD in .env (XAMPP default: root, empty password)"
+    : err.code === "ER_BAD_DB_ERROR" ? "Database not found — check DB_NAME (cPanel prefixes it, e.g. user_milkpro)"
+    : err.code === "ECONNREFUSED" ? "MySQL is not running — start it (XAMPP) or check DB_HOST in cPanel"
+    : err.code === "ER_NO_SUCH_TABLE" ? `${err.message} — restart the app once (it auto-creates missing tables) or check /api/diagnose`
+    : err.code === "ER_BAD_FIELD_ERROR" ? `${err.sqlMessage ?? err.message} — your existing table uses different column names. Open /api/inspect to see the real columns, then tell the developer.`
+    : err.code === "ER_DUP_ENTRY" ? `${err.sqlMessage ?? err.message} — a record with this key already exists`
+    : "Run `npm run db:test` for a full diagnosis";
   res.status(500).json({
     error: "Database error",
-    detail: err.code === "ER_ACCESS_DENIED_ERROR"
-      ? "Check DB_USER / DB_PASSWORD in .env (XAMPP default: root, empty password)"
-      : err.code === "ER_BAD_DB_ERROR"
-        ? "Database not found — check DB_NAME (cPanel prefixes it, e.g. user_milkpro)"
-        : err.code === "ECONNREFUSED"
-          ? "MySQL is not running — start it (XAMPP) or check DB_HOST in cPanel"
-          : err.code === "ER_NO_SUCH_TABLE"
-            ? `${err.message} — restart the app once (it auto-creates missing tables) or check /api/diagnose`
-            : "Run `npm run db:test` for a full diagnosis",
+    code: err.code ?? "UNKNOWN",
+    sql: (err.sqlMessage ?? err.message ?? "").slice(0, 300),
+    detail: hint,
   });
 });
 
